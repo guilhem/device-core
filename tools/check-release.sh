@@ -11,9 +11,12 @@ readelf -h -A -V -d "$binary" > "$name.elf.txt"
 case "$TARGET" in
   arm-unknown-linux-gnueabihf)
     grep -Eq 'Machine: +ARM$' "$name.elf.txt"
-    grep -Eq 'Tag_CPU_arch: v6([^0-9]|$)' "$name.elf.txt"
+    grep -Eq 'Tag_CPU_arch: v6(KZ|K)?$' "$name.elf.txt"
     grep -q 'Tag_ABI_VFP_args: VFP registers' "$name.elf.txt"
-    ! grep -Eq 'Tag_CPU_arch: v([7-9]|[1-9][0-9])|Tag_THUMB_ISA_use: Thumb-2' "$name.elf.txt"
+    if grep -Eq 'Tag_THUMB_ISA_use: Thumb-2' "$name.elf.txt"; then
+      echo 'ARMv6 release requires unsupported Thumb-2 instructions' >&2
+      exit 1
+    fi
     libc_limit=2.41
     actual=$(qemu-arm -cpu arm1176 -L ../armv6-sysroot "$binary" --version)
     ;;

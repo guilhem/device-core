@@ -87,17 +87,12 @@ jobs:
           name: artifacts-plan-dist-manifest
           path: plan-dist-manifest.json
 
-  custom-tests:
-    uses: ./.github/workflows/tests.yml
-    secrets: inherit
-
   # Build and packages all the platform-specific things
   build-local-artifacts:
     name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
     # Let the initial task tell us to not run (currently very blunt)
     needs:
       - plan
-      - custom-tests
     if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
     strategy:
       fail-fast: false
@@ -231,6 +226,15 @@ jobs:
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
 
+  custom-tests:
+    needs:
+      - plan
+      - build-local-artifacts
+    uses: ./.github/workflows/tests.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
+
   custom-release-check:
     needs:
       - plan
@@ -245,9 +249,10 @@ jobs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
+      - custom-tests
       - custom-release-check
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-release-check.result == 'skipped' || needs.custom-release-check.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-tests.result == 'skipped' || needs.custom-tests.result == 'success') && (needs.custom-release-check.result == 'skipped' || needs.custom-release-check.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-24.04"

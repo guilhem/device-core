@@ -21,8 +21,7 @@ checksum = "sha256"
 # Which actions to run on pull requests
 pr-run-mode = "upload"
 github-build-setup = "../release-setup.yml"
-plan-jobs = ["./tests"]
-global-artifacts-jobs = ["./release-check"]
+global-artifacts-jobs = ["./tests", "./release-check"]
 # Extra static files to include in each App (path relative to this Cargo.toml's dir)
 include = ["NOTICE"]
 
