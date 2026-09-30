@@ -1,0 +1,41 @@
+name: Check release binaries
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: arm-unknown-linux-gnueabihf
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ fromJSON(inputs.plan).releases[0].app_version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: artifacts-build-local-${{ matrix.target }}
+          path: build/release-check
+      - name: Prepare ARMv6 runtime
+        if: matrix.target == 'arm-unknown-linux-gnueabihf'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user jq
+          bash tools/release-armv6.sh
+      - name: Verify archive, ABI and executable
+        run: bash tools/check-release.sh

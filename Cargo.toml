@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
 description = "Linux device services over D-Bus and optional HTTP"
+repository = "https://github.com/guilhem/device-core"
 
 [dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "process", "sync", "signal", "io-util", "net", "fs"] }
@@ -28,3 +29,6 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[profile.dist]
+inherits = "release"

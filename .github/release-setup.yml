@@ -1,0 +1,10 @@
+- name: Prepare ARMv6 compiler
+  if: contains(matrix.targets, 'arm-unknown-linux-gnueabihf')
+  run: |
+    sudo apt-get update
+    sudo apt-get install -y --no-install-recommends clang lld llvm jq python3-venv
+    python3 -m venv build/zigbuild
+    build/zigbuild/bin/pip install cargo-zigbuild==0.23.4
+    build/zigbuild/bin/cargo-zigbuild --version
+    echo "$PWD/build/zigbuild/bin" >> "$GITHUB_PATH"
+    bash tools/release-armv6.sh
