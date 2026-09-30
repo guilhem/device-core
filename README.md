@@ -13,6 +13,40 @@ cargo build --locked
 cargo test --locked
 ```
 
+## Releases
+
+[GitHub releases](https://github.com/guilhem/device-core/releases) provide
+`device-core-<target>.tar.gz` for `arm-unknown-linux-gnueabihf` (ARMv6 hard-float),
+`aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu`. Each archive contains
+the daemon, README, GPL license and notices. `sha256.sum`, per-archive checksums,
+`source.tar.gz` and `dist-manifest.json` accompany each release. Consumers should
+pin a version and archive checksum.
+
+ARMv6 uses a checksum-pinned Raspbian sysroot and requires glibc 2.41. ARM64
+and x86_64 use native Ubuntu 24.04 runners and require glibc 2.39 or later.
+Release checks verify the archives, ELF architecture, libc requirements and
+`--version`, using QEMU ARM1176 for ARMv6. Hardware qualification remains separate.
+
+Publication uses [cargo-dist](https://axodotdev.github.io/cargo-dist/) 0.33.0.
+Before a release, update `Cargo.toml`, `Cargo.lock` and `CHANGELOG.md`, then run:
+
+```sh
+dist generate --check
+dist plan --tag v0.1.0
+```
+
+Pull requests run the tests and build/check all release archives. After review
+and successful checks, push the matching version tag to publish that commit:
+
+```sh
+git tag -a v0.1.0 -m "device-core v0.1.0"
+git push origin v0.1.0
+```
+
+The generated workflow publishes only after tests and all binary checks pass.
+Change `dist-workspace.toml` or `.github/release-setup.yml`, then run `dist generate`
+to update it; do not edit `.github/workflows/release.yml` directly.
+
 For a disposable local instance, start a private D-Bus and run:
 
 ```sh
