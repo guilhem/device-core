@@ -1,0 +1,177 @@
+<?xml version="1.0"?>
+<node name="/io/github/guilhem/DeviceCore1">
+  <interface name="io.github.guilhem.DeviceCore1.Manager">
+    <method name="RegisterAgent">
+      <arg name="path" type="o" direction="in" />
+    </method>
+    <property name="Capabilities" type="as" access="read" />
+    <property name="Instance" type="s" access="read" />
+    <property name="Maintenance" type="b" access="read" />
+    <property name="Ready" type="b" access="read" />
+    <property name="Version" type="s" access="read" />
+    <signal name="Event">
+      <arg name="domain" type="s" />
+      <arg name="data_json" type="s" />
+    </signal>
+    <signal name="Resync">
+    </signal>
+  </interface>
+  <node name="Audio">
+    <interface name="io.github.guilhem.DeviceCore1.Audio">
+      <method name="SetVolume">
+        <arg name="percent" type="u" direction="in" />
+      </method>
+      <method name="Start">
+        <arg name="kind" type="s" direction="in" />
+        <arg name="source" type="s" direction="in" />
+        <arg type="s" direction="out" />
+      </method>
+      <method name="Stop">
+        <arg name="id" type="s" direction="in" />
+      </method>
+      <method name="Wait">
+        <arg name="id" type="s" direction="in" />
+        <arg type="s" direction="out" />
+      </method>
+      <property name="Status" type="(ssu)" access="read" />
+      <signal name="Changed">
+        <arg name="status" type="(ssu)" />
+      </signal>
+    </interface>
+  </node>
+  <node name="Config">
+    <interface name="io.github.guilhem.DeviceCore1.Config">
+      <method name="Read">
+        <arg type="s" direction="out" />
+        <arg type="(ssub(bs(uu)(uu))b)" direction="out" />
+      </method>
+      <method name="Update">
+        <arg name="expected_revision" type="s" direction="in" />
+        <arg name="settings" type="(ssub(bs(uu)(uu))b)" direction="in" />
+        <arg type="s" direction="out" />
+      </method>
+    </interface>
+  </node>
+  <node name="Network">
+    <interface name="io.github.guilhem.DeviceCore1.Network">
+      <method name="AcquireGuard">
+        <arg name="expected_generation" type="s" direction="in" />
+        <arg type="h" direction="out" />
+      </method>
+      <method name="Authorized">
+        <arg name="token" type="s" direction="in" />
+        <arg type="b" direction="out" />
+      </method>
+      <method name="Cancel">
+        <arg name="attempt_id" type="t" direction="in" />
+      </method>
+      <method name="Connect">
+        <arg name="ssid" type="ay" direction="in" />
+        <arg name="security" type="s" direction="in" />
+        <arg name="password" type="s" direction="in" />
+        <arg name="uuid" type="s" direction="in" />
+        <arg name="token" type="s" direction="in" />
+        <arg type="t" direction="out" />
+      </method>
+      <method name="Forget">
+        <arg name="uuid" type="s" direction="in" />
+      </method>
+      <method name="Release">
+        <arg name="token" type="s" direction="in" />
+      </method>
+      <method name="ReportPresence">
+        <arg name="monotonic_ns" type="t" direction="in" />
+      </method>
+      <method name="Reserve">
+        <arg name="token" type="s" direction="in" />
+        <arg type="s" direction="out" />
+      </method>
+      <method name="Scan">
+    </method>
+      <property name="Networks" type="a(ayys)" access="read" />
+      <property name="Profiles" type="a(say)" access="read" />
+      <property name="Status" type="(ssbsaystss)" access="read" />
+      <signal name="Changed">
+        <arg name="status" type="(ssbsaystss)" />
+      </signal>
+    </interface>
+  </node>
+  <node name="System">
+    <interface name="io.github.guilhem.DeviceCore1.System">
+      <method name="Clock">
+        <arg type="s" direction="out" />
+        <arg type="x" direction="out" />
+      </method>
+      <method name="Connectivity">
+        <arg type="s" direction="out" />
+      </method>
+      <method name="GetSSHKeys">
+        <arg type="s" direction="out" />
+        <arg type="s" direction="out" />
+      </method>
+      <method name="PowerOff">
+    </method>
+      <method name="Reboot">
+    </method>
+      <method name="SetSSHKeys">
+        <arg name="expected_revision" type="s" direction="in" />
+        <arg name="keys" type="s" direction="in" />
+        <arg type="s" direction="out" />
+      </method>
+      <method name="SetTime">
+        <arg name="unix_microseconds" type="x" direction="in" />
+      </method>
+    </interface>
+  </node>
+  <node name="Updates">
+    <interface name="io.github.guilhem.DeviceCore1.Updates">
+      <method name="Check">
+        <arg type="a(sstsssbbss)" direction="out" />
+      </method>
+      <method name="Install">
+        <arg name="tag" type="s" direction="in" />
+        <arg name="channel" type="s" direction="in" />
+        <arg name="automatic" type="b" direction="in" />
+        <arg name="retry" type="b" direction="in" />
+        <arg type="s" direction="out" />
+      </method>
+      <method name="Reconcile">
+    </method>
+      <method name="Releases">
+        <arg name="channel" type="s" direction="in" />
+        <arg type="a(sstsssbbss)" direction="out" />
+      </method>
+      <property name="Status" type="(ssissbsssbbbsss)" access="read" />
+    </interface>
+  </node>
+  <node name="Voice">
+    <interface name="io.github.guilhem.DeviceCore1.Voice">
+      <method name="Command">
+        <arg name="command" type="s" direction="in" />
+      </method>
+      <method name="Enable">
+        <arg name="enabled" type="b" direction="in" />
+      </method>
+      <property name="Status" type="s" access="read" />
+      <property name="Supported" type="b" access="read" />
+      <signal name="Event">
+        <arg name="event" type="s" />
+        <arg name="data_json" type="s" />
+      </signal>
+    </interface>
+  </node>
+  <node name="Agent">
+    <interface name="io.github.guilhem.DeviceCore1.Agent">
+      <method name="Abort">
+        <arg name="operation" type="s" direction="in" />
+      </method>
+      <method name="Acquire">
+        <arg name="operation" type="s" direction="in" />
+        <arg name="token" type="s" direction="out" />
+      </method>
+      <method name="Release">
+        <arg name="token" type="s" direction="in" />
+      </method>
+    </interface>
+  </node>
+</node>

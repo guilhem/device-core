@@ -1,0 +1,1916 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "device-core",
+    "version": "1",
+    "license": {
+      "name": "GPL-3.0-only",
+      "identifier": "GPL-3.0-only"
+    },
+    "description": "Opt-in unauthenticated HTTP. No listener unless DEVICE_CORE_HTTP_ADDR is explicit. Presence reporting, descriptor guards and maintenance-agent registration are D-Bus only."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8081"
+    }
+  ],
+  "security": [],
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "summary": "Service readiness",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        }
+      }
+    },
+    "/v1/capabilities": {
+      "get": {
+        "summary": "Enabled domains",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        }
+      }
+    },
+    "/v1/config": {
+      "get": {
+        "summary": "Read the authoritative system settings",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Config"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        }
+      },
+      "put": {
+        "summary": "Durably replace settings using the expected revision",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "revision": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "revision"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigUpdate"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/network": {
+      "get": {
+        "summary": "Read network state, visible networks and native profiles",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Network"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        }
+      }
+    },
+    "/v1/network/scan": {
+      "post": {
+        "summary": "Request a scan",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {},
+                  "required": []
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        }
+      }
+    },
+    "/v1/network/reservation": {
+      "post": {
+        "summary": "Create or renew a physical-presence reservation",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "token": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "token"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Token"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Release a reservation",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {},
+                  "required": []
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Token"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/network/authorized": {
+      "get": {
+        "summary": "Check physical authorization",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "authorized": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "authorized"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        },
+        "parameters": [
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/network/connect": {
+      "post": {
+        "summary": "Accept a background connection attempt",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "operation_id": {
+                      "type": "integer",
+                      "format": "uint64"
+                    }
+                  },
+                  "required": [
+                    "operation_id"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Connect"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/network/attempts/{id}/cancel": {
+      "post": {
+        "summary": "Cancel this exact connection attempt",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {},
+                  "required": []
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint64"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/network/profiles/{uuid}": {
+      "delete": {
+        "summary": "Forget a native network profile",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {},
+                  "required": []
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        },
+        "parameters": [
+          {
+            "name": "uuid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/audio": {
+      "get": {
+        "summary": "Read the current audio slot",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Audio"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        }
+      }
+    },
+    "/v1/audio/playbacks": {
+      "post": {
+        "summary": "Start and identify a file or loopback stream playback",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "operation_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "operation_id"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Playback"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/audio/playbacks/{id}": {
+      "get": {
+        "summary": "Wait for this playback outcome",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "outcome": {
+                      "type": "string",
+                      "enum": [
+                        "completed",
+                        "stopped",
+                        "preempted",
+                        "owner-lost",
+                        "failed"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "outcome"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "delete": {
+        "summary": "Stop only this playback",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {},
+                  "required": []
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/audio/volume": {
+      "put": {
+        "summary": "Set runtime software gain; persist a desired volume through Config",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {},
+                  "required": []
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Volume"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/system": {
+      "get": {
+        "summary": "Clock quality and connectivity",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/System"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        }
+      }
+    },
+    "/v1/system/time": {
+      "put": {
+        "summary": "Set the manual system time",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {},
+                  "required": []
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Time"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/system/ssh-keys": {
+      "get": {
+        "summary": "Read system SSH authorized keys",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Keys"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        }
+      },
+      "put": {
+        "summary": "Durably replace SSH keys using the expected revision",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "revision": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "revision"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KeysUpdate"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/system/reboot": {
+      "post": {
+        "summary": "Request a system reboot",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {},
+                  "required": []
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        }
+      }
+    },
+    "/v1/system/power-off": {
+      "post": {
+        "summary": "Request system power off",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {},
+                  "required": []
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        }
+      }
+    },
+    "/v1/voice": {
+      "get": {
+        "summary": "Voice support and status",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Voice"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        }
+      }
+    },
+    "/v1/voice/enabled": {
+      "put": {
+        "summary": "Persist desired voice enablement",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {},
+                  "required": []
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Enabled"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/voice/commands": {
+      "post": {
+        "summary": "Send one peripheral command without replay",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {},
+                  "required": []
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Command"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/updates": {
+      "get": {
+        "summary": "Read update state and durable operation identity",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Updates"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        }
+      }
+    },
+    "/v1/updates/releases": {
+      "get": {
+        "summary": "Read the current release catalogue",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Release"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        },
+        "parameters": [
+          {
+            "name": "channel",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/updates/check": {
+      "post": {
+        "summary": "Fetch and validate the release catalogue",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Release"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        }
+      }
+    },
+    "/v1/updates/install": {
+      "post": {
+        "summary": "Accept an actor-owned installation that survives caller disconnection",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "operation_id": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "operation_id"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Install"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/updates/reconcile": {
+      "post": {
+        "summary": "Reconcile the journal with the current RAUC owner",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {},
+                  "required": []
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error501"
+          }
+        }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "summary": "SSE notifications from the same domain event stream as D-Bus",
+        "description": "Initial snapshot, then network/audio/config/system/voice/updates/maintenance events. A resync event means re-read snapshots. No replay guarantee across daemon incarnations.",
+        "responses": {
+          "200": {
+            "description": "Event stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "HM": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "hour": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 23
+          },
+          "min": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 59
+          }
+        },
+        "required": [
+          "hour",
+          "min"
+        ]
+      },
+      "UpdatePolicy": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "automatic": {
+            "type": "boolean"
+          },
+          "channel": {
+            "type": "string",
+            "enum": [
+              "stable",
+              "test"
+            ]
+          },
+          "start": {
+            "$ref": "#/components/schemas/HM"
+          },
+          "end": {
+            "$ref": "#/components/schemas/HM"
+          }
+        },
+        "required": [
+          "automatic",
+          "channel",
+          "start",
+          "end"
+        ]
+      },
+      "Settings": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "locale": {
+            "type": "string",
+            "pattern": "^[a-z]{2}_[A-Z]{2}$"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "volume": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "auto_check_updates": {
+            "type": "boolean"
+          },
+          "updates": {
+            "$ref": "#/components/schemas/UpdatePolicy"
+          },
+          "voice_enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "locale",
+          "timezone",
+          "volume",
+          "auto_check_updates",
+          "updates",
+          "voice_enabled"
+        ]
+      },
+      "Config": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "revision": {
+            "type": "string"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/Settings"
+          }
+        },
+        "required": [
+          "revision",
+          "settings"
+        ]
+      },
+      "ConfigUpdate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "expected_revision": {
+            "type": "string"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/Settings"
+          }
+        },
+        "required": [
+          "expected_revision",
+          "settings"
+        ]
+      },
+      "NetworkStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "string"
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "address": {
+            "type": "string"
+          },
+          "ssid": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            }
+          },
+          "profile_uuid": {
+            "type": "string"
+          },
+          "attempt_id": {
+            "type": "integer",
+            "format": "uint64"
+          },
+          "phase": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "generation",
+          "ready",
+          "address",
+          "ssid",
+          "profile_uuid",
+          "attempt_id",
+          "phase",
+          "error"
+        ]
+      },
+      "NetworkInfo": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ssid": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "strength": {
+            "type": "integer"
+          },
+          "security": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ssid",
+          "strength",
+          "security"
+        ]
+      },
+      "Profile": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "uuid": {
+            "type": "string"
+          },
+          "ssid": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          }
+        },
+        "required": [
+          "uuid",
+          "ssid"
+        ]
+      },
+      "Network": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/NetworkStatus"
+          },
+          "networks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NetworkInfo"
+            }
+          },
+          "profiles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Profile"
+            }
+          }
+        },
+        "required": [
+          "status",
+          "networks",
+          "profiles"
+        ]
+      },
+      "Connect": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ssid": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            }
+          },
+          "security": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string",
+            "writeOnly": true
+          },
+          "uuid": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "ssid",
+          "security",
+          "password",
+          "uuid",
+          "token"
+        ]
+      },
+      "Token": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": []
+      },
+      "Audio": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "playing"
+            ]
+          },
+          "volume": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "volume"
+        ]
+      },
+      "Playback": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "file",
+              "stream"
+            ]
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "source"
+        ]
+      },
+      "Volume": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "percent": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "percent"
+        ]
+      },
+      "Clock": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "quality": {
+            "type": "string",
+            "enum": [
+              "ntp",
+              "manual",
+              "restored",
+              "unknown"
+            ]
+          },
+          "unix_seconds": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "quality",
+          "unix_seconds"
+        ]
+      },
+      "System": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "clock": {
+            "$ref": "#/components/schemas/Clock"
+          },
+          "connectivity": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "lan",
+              "offline"
+            ]
+          }
+        },
+        "required": [
+          "clock",
+          "connectivity"
+        ]
+      },
+      "Time": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "unix_microseconds": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "unix_microseconds"
+        ]
+      },
+      "Keys": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "keys": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "keys",
+          "revision"
+        ]
+      },
+      "Enabled": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ]
+      },
+      "Command": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "Voice": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "supported": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "supported",
+          "status"
+        ]
+      },
+      "Install": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "tag": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "automatic": {
+            "type": "boolean"
+          },
+          "retry": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "tag",
+          "channel",
+          "automatic",
+          "retry"
+        ]
+      },
+      "Release": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "tag": {
+            "type": "string"
+          },
+          "bundle_url": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "uint64"
+          },
+          "sums_url": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "published": {
+            "type": "string"
+          },
+          "prerelease": {
+            "type": "boolean"
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "problem": {
+            "type": "string"
+          },
+          "blocked": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tag",
+          "bundle_url",
+          "size",
+          "sums_url",
+          "notes",
+          "published",
+          "prerelease",
+          "ready",
+          "problem",
+          "blocked"
+        ]
+      },
+      "Updates": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "current": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "progress": {
+            "type": "integer"
+          },
+          "error": {
+            "type": "string"
+          },
+          "checked": {
+            "type": "string"
+          },
+          "checking": {
+            "type": "boolean"
+          },
+          "check_error": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "last_result": {
+            "type": "string"
+          },
+          "suspended": {
+            "type": "boolean"
+          },
+          "retry_required": {
+            "type": "boolean"
+          },
+          "pending_auto": {
+            "type": "boolean"
+          },
+          "pending_channel": {
+            "type": "string"
+          },
+          "last_window": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "current",
+          "state",
+          "progress",
+          "error",
+          "checked",
+          "checking",
+          "check_error",
+          "target",
+          "last_result",
+          "suspended",
+          "retry_required",
+          "pending_auto",
+          "pending_channel",
+          "last_window",
+          "operation_id"
+        ]
+      },
+      "Health": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ready": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string"
+          },
+          "maintenance": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ready",
+          "version",
+          "instance",
+          "maintenance"
+        ]
+      },
+      "KeysUpdate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "expected_revision": {
+            "type": "string"
+          },
+          "keys": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expected_revision",
+          "keys"
+        ]
+      }
+    },
+    "responses": {
+      "Error400": {
+        "description": "Invalid input",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error403": {
+        "description": "Physical proof denied",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error409": {
+        "description": "Operation refused, revision conflict or service unavailable",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error501": {
+        "description": "Optional function unavailable",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    }
+  }
+}
