@@ -25,6 +25,30 @@ pub(super) enum Outcome {
     Unknown(String),
 }
 
+pub(super) async fn available(connection: &Connection) -> Result<bool, String> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let bus = Proxy::new(
+            connection,
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        let owned: bool = bus
+            .call("NameHasOwner", &(DEST,))
+            .await
+            .map_err(|e| e.to_string())?;
+        let activatable: Vec<String> = bus
+            .call("ListActivatableNames", &())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(owned || activatable.iter().any(|name| name == DEST))
+    })
+    .await
+    .map_err(|_| "RAUC availability lookup timed out".to_string())?
+}
+
 async fn owner(connection: &Connection) -> Result<String, String> {
     tokio::time::timeout(Duration::from_secs(10), async {
         let bus = Proxy::new(

@@ -87,6 +87,7 @@ Interface `io.github.guilhem.DeviceCore1.Updates`, object
 `/io/github/guilhem/DeviceCore1/Updates`: `Check() -> a(sstsssbbss)`,
 `Releases(channel:s) -> a(sstsssbbss)`,
 `Install(tag:s, channel:s, automatic:b, retry:b) -> operation_id:s`,
+`InstallBundle(fd:h, ignore_certificate:b, retry:b) -> operation_id:s`,
 `Reconcile()`, and readable `Status:(ssissbsssbbbsss)` property. Errors use
 `org.freedesktop.DBus.Error.Failed`. Status updates also emit `Events` domain
 `updates`; the parent forwards events/signals as for other domains. HTTP may
@@ -108,9 +109,11 @@ is complete. The module records the ID before calling acquire, including when
 acquire fails or times out. It later releases that same ID. RAUC requests and
 observation survive the original HTTP/D-Bus caller disconnecting.
 
-With no valid repository/asset configuration and an empty journal, Status is
-`unsupported`: the constructor calls no RAUC method or hook and clears the
-parent's startup gate before interfaces are exported. A nonempty
+With no valid repository/asset configuration, no journal/manual resources, no
+preparation unit, and no owned or activatable RAUC service, Status is
+`unsupported`: the constructor clears the parent's startup gate before interfaces
+are exported. Catalogue configuration is only required for online installs;
+a present RAUC service still supports local bundles and recovery. A nonempty
 journal still requires recovery even if the image disables update configuration;
 unknown RAUC remains fail closed.
 
@@ -191,6 +194,43 @@ after a clock correction. Policy, boot/RAUC and maintenance are checked again
 before installation and automatic reboot. A successful automatic reboot request
 is issued once per daemon incarnation; manual installs leave reboot explicit.
 
+## Local bundles
+
+`InstallBundle` has D-Bus input signature `hbb` and output signature `s`. It
+duplicates the received Unix descriptor before acceptance. Only
+readable regular files, nonempty and at most 2 GiB, are admitted. The actor owns
+the descriptor after the caller disconnects, retains the shared operation lock,
+acquires maintenance, copies in 64 KiB chunks to `data_dir/updates/manual.raucb`
+with `O_NOFOLLOW`, verifies the byte count, computes SHA256 and fsyncs the file
+and directory. It never accepts an input path or URL and never cleans online
+resume files during manual uploads.
+
+`rauc info --no-verify --output-format=json` reads the actual manifest version;
+inspection does not authorize the installation. Versions must be nonempty,
+contain no control characters, and be at most 64 characters. Same versions,
+downgrades and development versions are allowed locally. The journal's
+`pending.local` field defaults to false: online entries retain strict SemVer
+validation, while local entries accept these manifest versions and always have
+`automatic=false`. Slot, exact version and health still govern boot reconciliation.
+Manual installs never trigger automatic reboot.
+
+Signature verification remains RAUC's responsibility, using an empty install
+options dictionary for every install. `ignore_certificate=true` requires
+`Options.update_prepare_unit` (`DEVICE_CORE_UPDATE_PREPARE_UNIT`, default empty)
+and `Options.update_prepared_bundle` (`DEVICE_CORE_UPDATE_PREPARED_BUNDLE`, default
+empty). The latter must be a separate absolute path; on NabOS it is
+`/data/nabos-rauc-manual/bundle.raucb`. The image owns preparation, signature integrity
+checks, temporary trust and the protected output. The backend waits for native
+systemd jobs, stops the helper on confirmed RAUC idle before starting it, and
+checks that the prepared manifest version still matches the upload.
+
+The helper is stopped and its input removed only after idle probes from the
+same RAUC owner. Unknown/busy RAUC retains resources and maintenance; a changed
+owner needs a further reconciliation before cleanup. Startup/recovery stops
+orphan preparation before deleting its input or releasing maintenance. The
+backend never removes the root-owned prepared output: helper StopUnit owns its
+cleanup. With bypass disabled no helper is started.
+
 ## Validation
 
 ```sh
@@ -199,10 +239,12 @@ cargo test --test update_integration
 cargo clippy --all-targets -- -D warnings
 ```
 
-Four unit checks and fourteen integration checks cover the typed wire signatures,
+Six unit checks and twenty integration checks cover the typed wire signatures,
 catalogue/security limits, resumed downloads, journal/health/rollback, spoofed and
 stale Completed, lost replies/results, client disconnects, unknown-owner recovery,
 maintenance rollback, automatic policy and actor-serialized power requests.
-Integration checks exercise a private bus and loopback fake HTTP/RAUC only.
+Integration checks exercise a private bus and loopback fake HTTP/RAUC/systemd.
+Manual checks also require native `rauc`, `openssl` and `mksquashfs` on PATH to
+create signed verity bundles and exercise actual manifest inspection.
 Actual RAUC signature verification, power cuts, and the complete service with a
 read-only root and effective systemd sandbox still require target/image validation.
