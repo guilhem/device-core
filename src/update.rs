@@ -515,7 +515,7 @@ impl Core {
         s.last_result = j.last_result.clone();
         s.last_window = j.last_window.clone();
         s.suspended = !j.suspended.is_empty() || catalog::version(&s.current).is_none();
-        s.retry_required = !j.suspended.is_empty();
+        s.retry_required = !j.suspended.is_empty() || j.blocked.contains_key(&j.target);
         if s.target.is_empty() {
             s.target = j.target.clone();
         }

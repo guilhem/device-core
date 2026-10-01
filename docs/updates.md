@@ -113,9 +113,13 @@ With no valid repository/asset configuration, no journal/manual resources, no
 preparation unit, and no owned or activatable RAUC service, Status is
 `unsupported`: the constructor clears the parent's startup gate before interfaces
 are exported. Catalogue configuration is only required for online installs;
-a present RAUC service still supports local bundles and recovery. A nonempty
-journal still requires recovery even if the image disables update configuration;
-unknown RAUC remains fail closed.
+a present RAUC service still supports local bundles and recovery. Initial
+availability starts an unowned activatable RAUC service with `StartServiceByName`
+and confirms its owner before the first recovery probe. An already owned service
+is not activated again; activation/owner errors keep the startup gate closed.
+Installation observers and later recovery probes remain passive after owner loss.
+A nonempty journal still requires recovery even if the image disables update
+configuration; unknown RAUC remains fail closed.
 
 System D-Bus/HTTP Reboot and PowerOff must call `Updater::power(Hook)` with the
 parent's raw native System operation. This command holds the installation actor's
@@ -239,7 +243,7 @@ cargo test --test update_integration
 cargo clippy --all-targets -- -D warnings
 ```
 
-Six unit checks and twenty integration checks cover the typed wire signatures,
+Six unit checks and twenty-one integration checks cover the typed wire signatures,
 catalogue/security limits, resumed downloads, journal/health/rollback, spoofed and
 stale Completed, lost replies/results, client disconnects, unknown-owner recovery,
 maintenance rollback, automatic policy and actor-serialized power requests.

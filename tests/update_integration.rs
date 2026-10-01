@@ -1581,7 +1581,7 @@ async fn manual_rauc_outcomes_retry_busy_and_unknown_owner_retain_helper() {
         .unwrap();
         assert_eq!(helper.0.lock().unwrap().jobs, [false, false, true, false]);
         assert!(!f.gate.blocked());
-        if mode == 3 {
+        if mode == 1 || mode == 3 {
             assert!(s.retry_required);
             let blocked = f.manual("dev-test", true, false).await;
             assert!(blocked.error.contains("retry explicitly"));
@@ -1620,4 +1620,213 @@ async fn manual_rauc_outcomes_retry_busy_and_unknown_owner_retain_helper() {
     assert!(f.gate.blocked());
     assert!(f.options.update_prepared_bundle.exists());
     assert!(f.options.data_dir.join("updates/manual.raucb").exists());
+}
+
+#[tokio::test]
+async fn activatable_native_rauc_is_started_before_initial_recovery() {
+    use futures_util::StreamExt;
+    // Native service activation uses its own disposable bus and slots, never the host bus.
+    let dir = std::env::temp_dir().join(format!("rauc-activation-{}", token().unwrap()));
+    std::fs::create_dir(&dir).unwrap();
+    let services = dir.join("services");
+    std::fs::create_dir(&services).unwrap();
+    let address = format!("unix:path={}", dir.join("bus").display());
+    let config = dir.join("rauc.conf");
+    std::fs::write(&config, format!(
+        "[system]\ncompatible=activation-test\nbootloader=noop\ndata-directory={}\n\n[slot.rootfs.0]\ndevice={}\ntype=ext4\nbootname=A\n\n[slot.rootfs.1]\ndevice={}\ntype=ext4\nbootname=B\n",
+        dir.join("rauc-data").display(), dir.join("slot-a.img").display(), dir.join("slot-b.img").display()
+    )).unwrap();
+    let executable = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|path| path.join("rauc"))
+        .find(|path| path.is_file())
+        .expect("native RAUC required");
+    std::fs::write(
+        services.join("de.pengutronix.rauc.service"),
+        format!(
+            "[D-BUS Service]\nName={RAUC}\nExec={} --conf={} --override-boot-slot=A service\n",
+            executable.display(),
+            config.display()
+        ),
+    )
+    .unwrap();
+    let bus_config = dir.join("bus.conf");
+    std::fs::write(&bus_config, format!(
+        "<busconfig><type>session</type><listen>{address}</listen><servicedir>{}</servicedir><auth>EXTERNAL</auth><policy context=\"default\"><allow own=\"*\"/><allow send_destination=\"*\"/><allow receive_sender=\"*\"/><allow eavesdrop=\"true\"/></policy></busconfig>", services.display()
+    )).unwrap();
+    let child = Command::new("dbus-daemon")
+        .arg("--nofork")
+        .arg(format!("--config-file={}", bus_config.display()))
+        .env("DBUS_SYSTEM_BUS_ADDRESS", &address)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let bus = PrivateBus {
+        child,
+        dir,
+        address,
+    };
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !bus.dir.join("bus").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let connection = bus.connect().await;
+    let proxy = Proxy::new(
+        &connection,
+        "org.freedesktop.DBus",
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
+    )
+    .await
+    .unwrap();
+    assert!(!proxy
+        .call::<_, _, bool>("NameHasOwner", &(RAUC,))
+        .await
+        .unwrap());
+    assert!(proxy
+        .call::<_, _, Vec<String>>("ListActivatableNames", &())
+        .await
+        .unwrap()
+        .iter()
+        .any(|name| name == RAUC));
+    let monitor = bus.connect().await;
+    Proxy::new(
+        &monitor,
+        "org.freedesktop.DBus",
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus.Monitoring",
+    )
+    .await
+    .unwrap()
+    .call::<_, _, ()>(
+        "BecomeMonitor",
+        &(
+            vec!["type='method_call',interface='org.freedesktop.DBus'"],
+            0u32,
+        ),
+    )
+    .await
+    .unwrap();
+    let activation_count = Arc::new(AtomicUsize::new(0));
+    let calls = activation_count.clone();
+    let mut stream = zbus::MessageStream::from(&monitor);
+    let observation = tokio::spawn(async move {
+        while let Some(Ok(message)) = stream.next().await {
+            if message
+                .header()
+                .member()
+                .is_some_and(|member| member.as_str() == "GetId")
+            {
+                break; // Receive-order barrier after the constructors and recovery below.
+            }
+            if message
+                .header()
+                .member()
+                .is_some_and(|member| member.as_str() == "StartServiceByName")
+            {
+                if let Ok((name, _)) = message.body().deserialize::<(String, u32)>() {
+                    if name == RAUC {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        }
+    });
+    let mut options = Options::from_env(true);
+    options.update_repo.clear();
+    options.update_asset.clear();
+    options.update_prepare_unit.clear();
+    options.data_dir = bus.dir.join("data");
+    options.boot_health = bus.dir.join("health");
+    std::fs::write(&options.boot_health, "good A\n").unwrap();
+    let gate = Gate::default();
+    gate.set(true);
+    let (_, settings) = watch::channel(Settings::default());
+    let acquired = Arc::new(Mutex::new(vec![]));
+    let released = Arc::new(Mutex::new(vec![]));
+    let hooks = Fixture::hooks(
+        &gate,
+        &acquired,
+        &released,
+        &Arc::new(AtomicBool::new(false)),
+        &Arc::new(AtomicBool::new(false)),
+        &Arc::new(AtomicUsize::new(0)),
+    );
+    let updater = Updater::new(
+        connection.clone(),
+        &options,
+        Events::default(),
+        gate.clone(),
+        settings.clone(),
+        hooks.clone(),
+    )
+    .await
+    .unwrap();
+    let owner: String = proxy
+        .call("GetNameOwner", &(RAUC,))
+        .await
+        .expect("initial availability must activate RAUC");
+    let pid: u32 = proxy
+        .call("GetConnectionUnixProcessID", &(&owner,))
+        .await
+        .unwrap();
+    struct ActivatedRauc(u32);
+    impl Drop for ActivatedRauc {
+        fn drop(&mut self) {
+            // SAFETY: PID came from the unique RAUC owner on this disposable test bus.
+            unsafe {
+                libc::kill(self.0 as i32, libc::SIGTERM);
+            }
+        }
+    }
+    let native = ActivatedRauc(pid);
+    assert_eq!(updater.status().state, "idle", "{:?}", updater.status());
+    assert!(!gate.blocked());
+    assert!(!updater.configured());
+    let another = Updater::new(
+        connection.clone(),
+        &options,
+        Events::default(),
+        gate.clone(),
+        settings,
+        hooks,
+    )
+    .await
+    .unwrap();
+    assert_eq!(another.status().state, "idle");
+    assert_eq!(
+        proxy
+            .call::<_, _, String>("GetNameOwner", &(RAUC,))
+            .await
+            .unwrap(),
+        owner
+    );
+    drop(native);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while proxy
+            .call::<_, _, bool>("NameHasOwner", &(RAUC,))
+            .await
+            .unwrap()
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(updater.reconcile().await.is_err());
+    assert!(gate.blocked());
+    proxy.call::<_, _, String>("GetId", &()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), observation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        activation_count.load(Ordering::SeqCst),
+        1,
+        "already owned RAUC must not be activated again"
+    );
 }

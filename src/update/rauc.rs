@@ -39,11 +39,26 @@ pub(super) async fn available(connection: &Connection) -> Result<bool, String> {
             .call("NameHasOwner", &(DEST,))
             .await
             .map_err(|e| e.to_string())?;
+        if owned {
+            return Ok(true);
+        }
         let activatable: Vec<String> = bus
             .call("ListActivatableNames", &())
             .await
             .map_err(|e| e.to_string())?;
-        Ok(owned || activatable.iter().any(|name| name == DEST))
+        if !activatable.iter().any(|name| name == DEST) {
+            return Ok(false);
+        }
+        // Initial availability must establish an owner; passive probes never activate a lost one.
+        let _: u32 = bus
+            .call("StartServiceByName", &(DEST, 0u32))
+            .await
+            .map_err(|e| e.to_string())?;
+        let _: String = bus
+            .call("GetNameOwner", &(DEST,))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(true)
     })
     .await
     .map_err(|_| "RAUC availability lookup timed out".to_string())?
