@@ -1126,3 +1126,707 @@ async fn optional_domain_allows_power_and_releases_failed_hooks() {
         .contains("native power failed"));
     assert!(!f.gate.blocked());
 }
+
+// Real RAUC manifests; install and systemd effects remain private-bus simulations.
+fn manual_bundle(dir: &std::path::Path, version: &str) -> std::fs::File {
+    let base = dir.join(format!("manual-fixture-{}", token().unwrap()));
+    let content = base.join("content");
+    std::fs::create_dir_all(&content).unwrap();
+    std::fs::write(content.join("manifest.raucm"), format!(
+        "[update]\ncompatible=test-board\nversion={version}\n\n[bundle]\nformat=verity\n\n[image.rootfs]\nfilename=rootfs.img\n"
+    )).unwrap();
+    let bytes: Vec<u8> = (0..16384).map(|_| fastrand::u8(..)).collect();
+    std::fs::write(content.join("rootfs.img"), bytes).unwrap();
+    let cert = base.join("cert.pem");
+    let key = base.join("key.pem");
+    let generated = Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=device-core-test",
+        ])
+        .arg("-keyout")
+        .arg(&key)
+        .arg("-out")
+        .arg(&cert)
+        .output()
+        .expect("openssl required for manual RAUC checks");
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let path = base.join("misleading-filename-v999.raucb");
+    let generated = Command::new("rauc")
+        .arg("bundle")
+        .arg(format!("--cert={}", cert.display()))
+        .arg(format!("--key={}", key.display()))
+        .arg("--mksquashfs-args=-processors 1 -comp gzip")
+        .arg(content)
+        .arg(&path)
+        .output()
+        .expect("RAUC (with verity/JSON support) and mksquashfs required for manual bundle checks");
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    std::fs::File::open(path).unwrap()
+}
+
+impl Fixture {
+    async fn refresh(&mut self) {
+        self.updater = self.fresh(&self.options).await;
+        self.connection
+            .object_server()
+            .remove::<Updater, _>(PATH)
+            .await
+            .unwrap();
+        self.connection
+            .object_server()
+            .at(PATH, self.updater.clone())
+            .await
+            .unwrap();
+    }
+    async fn manual(&self, version: &str, bypass: bool, retry: bool) -> Status {
+        use std::os::fd::AsFd;
+        let file = manual_bundle(&self.bus.dir, version);
+        let id = self
+            .updater
+            .install_bundle(file.as_fd().into(), bypass, retry)
+            .await
+            .unwrap();
+        drop(file);
+        self.terminal(&id).await
+    }
+}
+
+#[derive(Default)]
+struct PrepareData {
+    input: PathBuf,
+    output: PathBuf,
+    jobs: Vec<bool>,
+    active: bool,
+    fail_start: bool,
+    fail_stop: bool,
+}
+#[derive(Clone)]
+struct FakePrepare(Arc<Mutex<PrepareData>>);
+impl FakePrepare {
+    async fn job(
+        &self,
+        unit: &str,
+        start: bool,
+        connection: &Connection,
+    ) -> fdo::Result<zbus::zvariant::OwnedObjectPath> {
+        assert_eq!(unit, "manual-prepare.service");
+        let (id, result) = {
+            let mut d = self.0.lock().unwrap();
+            d.jobs.push(start);
+            if !start && d.fail_stop && d.active {
+                return Err(fdo::Error::Failed("helper cleanup failed".into()));
+            }
+            let failed = start && d.fail_start;
+            if !failed {
+                if start {
+                    std::fs::copy(&d.input, &d.output).unwrap();
+                    d.active = true;
+                } else {
+                    match std::fs::remove_file(&d.output) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => panic!("{e}"),
+                    }
+                    d.active = false;
+                }
+            }
+            (d.jobs.len() as u32, if failed { "failed" } else { "done" })
+        };
+        let path = zbus::zvariant::OwnedObjectPath::try_from(format!(
+            "/org/freedesktop/systemd1/job/{id}"
+        ))
+        .unwrap();
+        let emitted = path.clone();
+        let unit = unit.to_string();
+        let connection = connection.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            connection
+                .emit_signal(
+                    None::<&str>,
+                    "/org/freedesktop/systemd1",
+                    "org.freedesktop.systemd1.Manager",
+                    "JobRemoved",
+                    &(id, emitted, unit, result),
+                )
+                .await
+                .unwrap();
+        });
+        Ok(path)
+    }
+}
+#[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
+impl FakePrepare {
+    fn subscribe(&self) {}
+    async fn start_unit(
+        &self,
+        unit: &str,
+        mode: &str,
+        #[zbus(connection)] connection: &Connection,
+    ) -> fdo::Result<zbus::zvariant::OwnedObjectPath> {
+        assert_eq!(mode, "replace");
+        self.job(unit, true, connection).await
+    }
+    async fn stop_unit(
+        &self,
+        unit: &str,
+        mode: &str,
+        #[zbus(connection)] connection: &Connection,
+    ) -> fdo::Result<zbus::zvariant::OwnedObjectPath> {
+        assert_eq!(mode, "replace");
+        self.job(unit, false, connection).await
+    }
+}
+async fn prepare_manager(f: &mut Fixture) -> (Connection, FakePrepare) {
+    let output = f.bus.dir.join("root-owned-output.raucb");
+    let prepare = FakePrepare(Arc::new(Mutex::new(PrepareData {
+        input: f.options.data_dir.join("updates/manual.raucb"),
+        output: output.clone(),
+        ..PrepareData::default()
+    })));
+    let connection = zbus::connection::Builder::address(f.bus.address.as_str())
+        .unwrap()
+        .name("org.freedesktop.systemd1")
+        .unwrap()
+        .serve_at("/org/freedesktop/systemd1", prepare.clone())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    f.options.update_prepare_unit = "manual-prepare.service".into();
+    f.options.update_prepared_bundle = output;
+    (connection, prepare)
+}
+
+#[tokio::test]
+async fn manual_wire_fd_survives_disconnect_is_offline_and_uses_real_dev_manifest() {
+    use std::io::{Seek, SeekFrom};
+    use std::os::fd::AsFd;
+    let mut f = Fixture::new().await;
+    assert!(f.options.update_prepare_unit.is_empty());
+    assert!(f.options.update_prepared_bundle.as_os_str().is_empty());
+    f.options.update_repo.clear();
+    f.options.update_asset.clear();
+    f.options.image_version = "dev-test".into(); // Same version is intentionally allowed.
+    f.refresh().await;
+    assert_eq!(f.updater.status().state, "idle");
+    assert!(!f.updater.configured());
+    assert!(f.updater.check().await.is_err());
+    f.rauc.0.lock().unwrap().mode = 4;
+    let mut file = manual_bundle(&f.bus.dir, "dev-test");
+    file.seek(SeekFrom::End(0)).unwrap();
+    let expected = {
+        use std::os::unix::fs::FileExt;
+        let mut bytes = vec![0; file.metadata().unwrap().len() as usize];
+        file.read_exact_at(&mut bytes, 0).unwrap();
+        bytes
+    };
+    let client = f.bus.connect().await;
+    let proxy = Proxy::new(
+        &client,
+        f.connection.unique_name().unwrap().as_str(),
+        PATH,
+        UPDATES,
+    )
+    .await
+    .unwrap();
+    let introspection = Proxy::new(
+        &client,
+        f.connection.unique_name().unwrap().as_str(),
+        PATH,
+        "org.freedesktop.DBus.Introspectable",
+    )
+    .await
+    .unwrap();
+    let xml: String = introspection.call("Introspect", &()).await.unwrap();
+    let method = xml
+        .split("<method name=\"InstallBundle\">")
+        .nth(1)
+        .unwrap()
+        .split("</method>")
+        .next()
+        .unwrap();
+    assert!(method.contains("type=\"h\""));
+    assert_eq!(method.matches("type=\"b\"").count(), 2);
+    let id: String = proxy
+        .call(
+            "InstallBundle",
+            &(zbus::zvariant::Fd::from(file.as_fd()), false, false),
+        )
+        .await
+        .unwrap();
+    assert_eq!(file.stream_position().unwrap(), expected.len() as u64);
+    drop(file);
+    drop(proxy);
+    client.close().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while f.rauc.0.lock().unwrap().installed.is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let peer = f.options.data_dir.join("updates/online-peer.part");
+    std::fs::write(&peer, b"online resume bytes").unwrap();
+    let another = manual_bundle(&f.bus.dir, "v1.0.0");
+    assert!(f
+        .updater
+        .install_bundle(another.as_fd().into(), false, false)
+        .await
+        .unwrap_err()
+        .contains("in progress"));
+    assert!(f
+        .updater
+        .power(Arc::new(|_| Box::pin(async { Ok(()) })))
+        .await
+        .is_err());
+    let s = f.terminal(&id).await;
+    assert_eq!(s.state, "reboot", "{s:?}");
+    assert_eq!(s.target, "dev-test");
+    assert!(!s.pending_auto);
+    assert_eq!(f.reboots.load(Ordering::SeqCst), 0);
+    assert_eq!(f.rauc.0.lock().unwrap().installed[0], expected);
+    assert_eq!(std::fs::read(peer).unwrap(), b"online resume bytes");
+    assert!(!f.options.data_dir.join("updates/manual.raucb").exists());
+    let journal: Value = serde_json::from_slice(
+        &std::fs::read(f.options.data_dir.join("updates/state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(journal["pending"]["local"], true);
+    assert_eq!(journal["pending"]["automatic"], false);
+    assert_eq!(journal["pending"]["tag"], "dev-test");
+    assert_eq!(
+        journal["pending"]["sha256"],
+        format!("{:x}", Sha256::digest(&expected))
+    );
+    let recovered = f.fresh(&f.options).await;
+    assert_eq!(recovered.status().state, "reboot");
+    assert!(!recovered.status().retry_required); // Non-SemVer local journal was retained.
+    let retry = f.manual("dev-test", false, true).await;
+    assert!(retry.error.contains("restart to finish"));
+}
+
+#[tokio::test]
+async fn manual_fd_refusals_and_certificate_bypass_defaults_off() {
+    use std::os::fd::AsFd;
+    let f = Fixture::new().await;
+    let client = f.bus.connect().await;
+    let proxy = Proxy::new(
+        &client,
+        f.connection.unique_name().unwrap().as_str(),
+        PATH,
+        UPDATES,
+    )
+    .await
+    .unwrap();
+    let path = f.bus.dir.join("input");
+    std::fs::write(&path, b"valid descriptor").unwrap();
+    let regular = std::fs::File::open(&path).unwrap();
+    assert!(proxy
+        .call::<_, _, String>(
+            "InstallBundle",
+            &(zbus::zvariant::Fd::from(regular.as_fd()), true, false)
+        )
+        .await
+        .is_err());
+    let directory = std::fs::File::open(&f.bus.dir).unwrap();
+    let write_only = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    let (socket, _) = std::os::unix::net::UnixStream::pair().unwrap();
+    for fd in [directory.as_fd(), write_only.as_fd(), socket.as_fd()] {
+        assert!(proxy
+            .call::<_, _, String>(
+                "InstallBundle",
+                &(zbus::zvariant::Fd::from(fd), false, false)
+            )
+            .await
+            .is_err());
+    }
+    for size in [0, (2u64 << 30) + 1] {
+        write_only.set_len(size).unwrap();
+        assert!(proxy
+            .call::<_, _, String>(
+                "InstallBundle",
+                &(zbus::zvariant::Fd::from(regular.as_fd()), false, false)
+            )
+            .await
+            .is_err());
+    }
+    assert!(f.rauc.0.lock().unwrap().installed.is_empty());
+    assert!(!f.options.data_dir.join("updates/manual.raucb").exists());
+    assert!(!f.gate.blocked());
+}
+
+#[tokio::test]
+async fn manual_downgrade_and_local_journal_reconcile_exact_version_and_slot() {
+    for (slot, version, health, updated) in [
+        ("B", "dev-test", "good", true),
+        ("B", "other-dev", "good", false),
+        ("A", "v1.1.0", "good", false),
+    ] {
+        let f = Fixture::new().await;
+        assert_eq!(f.manual("dev-test", false, false).await.state, "reboot");
+        let path = f.options.data_dir.join("updates/state.json");
+        let mut j: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        j["pending"]["boot_id"] = json!("previous-boot");
+        std::fs::write(path, serde_json::to_vec(&j).unwrap()).unwrap();
+        f.rauc.0.lock().unwrap().slot = slot.into();
+        std::fs::write(&f.options.boot_health, format!("{health} {slot}\n")).unwrap();
+        let mut options = f.options.clone();
+        options.image_version = version.into();
+        options.update_repo.clear();
+        options.update_asset.clear();
+        let recovered = f.fresh(&options).await;
+        assert_eq!(
+            recovered.status().last_result.contains("updated from"),
+            updated
+        );
+        assert_eq!(recovered.status().state, "idle");
+    }
+    let f = Fixture::new().await;
+    assert_eq!(f.manual("v1.0.0", false, false).await.state, "reboot");
+}
+
+#[tokio::test]
+async fn manual_helper_lifecycle_keeps_normal_installs_signed_and_recovers_orphans() {
+    let mut f = Fixture::new().await;
+    let (_manager, helper) = prepare_manager(&mut f).await;
+    // Startup must stop a helper from an earlier daemon before deleting its input.
+    std::fs::create_dir_all(f.options.data_dir.join("updates")).unwrap();
+    std::fs::write(
+        f.options.data_dir.join("updates/manual.raucb"),
+        b"orphan input",
+    )
+    .unwrap();
+    std::fs::write(&f.options.update_prepared_bundle, b"orphan output").unwrap();
+    helper.0.lock().unwrap().active = true;
+    f.refresh().await;
+    assert_eq!(helper.0.lock().unwrap().jobs, [false]);
+    assert!(!f.options.update_prepared_bundle.exists());
+    assert!(!f.options.data_dir.join("updates/manual.raucb").exists());
+    let s = f.manual("dev-test", true, false).await;
+    assert_eq!(s.state, "reboot", "{s:?}");
+    assert_eq!(helper.0.lock().unwrap().jobs, [false, false, true, false]);
+    assert!(!helper.0.lock().unwrap().active);
+    assert!(!f.options.update_prepared_bundle.exists());
+    assert!(!f.gate.blocked());
+    let mut normal = Fixture::new().await;
+    let (_manager, helper) = prepare_manager(&mut normal).await;
+    normal.refresh().await;
+    helper.0.lock().unwrap().jobs.clear();
+    normal.rauc.0.lock().unwrap().mode = 1;
+    let status = normal.manual("dev-test", false, false).await;
+    assert!(status.error.contains("signature verification failed"));
+    assert!(helper.0.lock().unwrap().jobs.is_empty()); // Opt-in is per installation.
+}
+
+#[tokio::test]
+async fn manual_helper_failures_keep_resources_until_rauc_and_cleanup_are_known() {
+    let mut f = Fixture::new().await;
+    let (_manager, helper) = prepare_manager(&mut f).await;
+    f.refresh().await;
+    helper.0.lock().unwrap().fail_start = true;
+    let s = f.manual("dev-test", true, false).await;
+    assert!(s.error.contains("job: failed"), "{s:?}");
+    assert!(!f.gate.blocked());
+    assert!(f.rauc.0.lock().unwrap().installed.is_empty());
+    helper.0.lock().unwrap().fail_start = false;
+    helper.0.lock().unwrap().fail_stop = true;
+    let s = f.manual("dev-test", true, false).await;
+    assert_eq!(s.state, "reboot");
+    assert!(s.error.contains("helper cleanup failed"), "{s:?}");
+    assert!(f.gate.blocked());
+    assert!(f.options.data_dir.join("updates/manual.raucb").exists());
+    assert!(f.options.update_prepared_bundle.exists());
+    helper.0.lock().unwrap().fail_stop = false;
+    f.updater.reconcile().await.unwrap();
+    assert!(!f.gate.blocked());
+    assert!(!f.options.update_prepared_bundle.exists());
+}
+
+#[tokio::test]
+async fn manual_rauc_outcomes_retry_busy_and_unknown_owner_retain_helper() {
+    for mode in [1, 2, 3] {
+        let mut f = Fixture::new().await;
+        let (_manager, helper) = prepare_manager(&mut f).await;
+        f.refresh().await;
+        f.rauc.0.lock().unwrap().mode = mode;
+        let s = f.manual("dev-test", true, false).await;
+        if mode == 2 {
+            assert_eq!(s.state, "reboot");
+        } else {
+            assert!(!s.error.is_empty(), "{s:?}");
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while f.gate.blocked() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(helper.0.lock().unwrap().jobs, [false, false, true, false]);
+        assert!(!f.gate.blocked());
+        if mode == 1 || mode == 3 {
+            assert!(s.retry_required);
+            let blocked = f.manual("dev-test", true, false).await;
+            assert!(blocked.error.contains("retry explicitly"));
+            f.rauc.0.lock().unwrap().mode = 0;
+            assert_eq!(f.manual("dev-test", true, true).await.state, "reboot");
+        }
+    }
+    let mut f = Fixture::new().await;
+    let (_manager, helper) = prepare_manager(&mut f).await;
+    f.refresh().await;
+    f.rauc.0.lock().unwrap().operation = "installing".into();
+    let busy = f.manual("dev-test", true, true).await;
+    assert!(busy.error.contains("busy"));
+    assert_eq!(helper.0.lock().unwrap().jobs, [false]);
+    f.rauc.0.lock().unwrap().operation = "idle".into();
+    f.updater.reconcile().await.unwrap();
+    f.rauc.0.lock().unwrap().mode = 4;
+    use std::os::fd::AsFd;
+    let file = manual_bundle(&f.bus.dir, "dev-test");
+    let id = f
+        .updater
+        .install_bundle(file.as_fd().into(), true, false)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while f.rauc.0.lock().unwrap().installed.is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    f.rauc_connection.clone().close().await.unwrap();
+    let s = f.terminal(&id).await;
+    assert_eq!(s.state, "uncertain");
+    assert_eq!(helper.0.lock().unwrap().jobs, [false, false, true]);
+    assert!(f.gate.blocked());
+    assert!(f.options.update_prepared_bundle.exists());
+    assert!(f.options.data_dir.join("updates/manual.raucb").exists());
+}
+
+#[tokio::test]
+async fn activatable_native_rauc_is_started_before_initial_recovery() {
+    use futures_util::StreamExt;
+    // Native service activation uses its own disposable bus and slots, never the host bus.
+    let dir = std::env::temp_dir().join(format!("rauc-activation-{}", token().unwrap()));
+    std::fs::create_dir(&dir).unwrap();
+    let services = dir.join("services");
+    std::fs::create_dir(&services).unwrap();
+    let address = format!("unix:path={}", dir.join("bus").display());
+    let config = dir.join("rauc.conf");
+    std::fs::write(&config, format!(
+        "[system]\ncompatible=activation-test\nbootloader=noop\ndata-directory={}\n\n[slot.rootfs.0]\ndevice={}\ntype=ext4\nbootname=A\n\n[slot.rootfs.1]\ndevice={}\ntype=ext4\nbootname=B\n",
+        dir.join("rauc-data").display(), dir.join("slot-a.img").display(), dir.join("slot-b.img").display()
+    )).unwrap();
+    let executable = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|path| path.join("rauc"))
+        .find(|path| path.is_file())
+        .expect("native RAUC required");
+    std::fs::write(
+        services.join("de.pengutronix.rauc.service"),
+        format!(
+            "[D-BUS Service]\nName={RAUC}\nExec={} --conf={} --override-boot-slot=A service\n",
+            executable.display(),
+            config.display()
+        ),
+    )
+    .unwrap();
+    let bus_config = dir.join("bus.conf");
+    std::fs::write(&bus_config, format!(
+        "<busconfig><type>session</type><listen>{address}</listen><servicedir>{}</servicedir><auth>EXTERNAL</auth><policy context=\"default\"><allow own=\"*\"/><allow send_destination=\"*\"/><allow receive_sender=\"*\"/><allow eavesdrop=\"true\"/></policy></busconfig>", services.display()
+    )).unwrap();
+    let child = Command::new("dbus-daemon")
+        .arg("--nofork")
+        .arg(format!("--config-file={}", bus_config.display()))
+        .env("DBUS_SYSTEM_BUS_ADDRESS", &address)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let bus = PrivateBus {
+        child,
+        dir,
+        address,
+    };
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !bus.dir.join("bus").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let connection = bus.connect().await;
+    let proxy = Proxy::new(
+        &connection,
+        "org.freedesktop.DBus",
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
+    )
+    .await
+    .unwrap();
+    assert!(!proxy
+        .call::<_, _, bool>("NameHasOwner", &(RAUC,))
+        .await
+        .unwrap());
+    assert!(proxy
+        .call::<_, _, Vec<String>>("ListActivatableNames", &())
+        .await
+        .unwrap()
+        .iter()
+        .any(|name| name == RAUC));
+    let monitor = bus.connect().await;
+    Proxy::new(
+        &monitor,
+        "org.freedesktop.DBus",
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus.Monitoring",
+    )
+    .await
+    .unwrap()
+    .call::<_, _, ()>(
+        "BecomeMonitor",
+        &(
+            vec!["type='method_call',interface='org.freedesktop.DBus'"],
+            0u32,
+        ),
+    )
+    .await
+    .unwrap();
+    let activation_count = Arc::new(AtomicUsize::new(0));
+    let calls = activation_count.clone();
+    let mut stream = zbus::MessageStream::from(&monitor);
+    let observation = tokio::spawn(async move {
+        while let Some(Ok(message)) = stream.next().await {
+            if message
+                .header()
+                .member()
+                .is_some_and(|member| member.as_str() == "GetId")
+            {
+                break; // Receive-order barrier after the constructors and recovery below.
+            }
+            if message
+                .header()
+                .member()
+                .is_some_and(|member| member.as_str() == "StartServiceByName")
+            {
+                if let Ok((name, _)) = message.body().deserialize::<(String, u32)>() {
+                    if name == RAUC {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        }
+    });
+    let mut options = Options::from_env(true);
+    options.update_repo.clear();
+    options.update_asset.clear();
+    options.update_prepare_unit.clear();
+    options.data_dir = bus.dir.join("data");
+    options.boot_health = bus.dir.join("health");
+    std::fs::write(&options.boot_health, "good A\n").unwrap();
+    let gate = Gate::default();
+    gate.set(true);
+    let (_, settings) = watch::channel(Settings::default());
+    let acquired = Arc::new(Mutex::new(vec![]));
+    let released = Arc::new(Mutex::new(vec![]));
+    let hooks = Fixture::hooks(
+        &gate,
+        &acquired,
+        &released,
+        &Arc::new(AtomicBool::new(false)),
+        &Arc::new(AtomicBool::new(false)),
+        &Arc::new(AtomicUsize::new(0)),
+    );
+    let updater = Updater::new(
+        connection.clone(),
+        &options,
+        Events::default(),
+        gate.clone(),
+        settings.clone(),
+        hooks.clone(),
+    )
+    .await
+    .unwrap();
+    let owner: String = proxy
+        .call("GetNameOwner", &(RAUC,))
+        .await
+        .expect("initial availability must activate RAUC");
+    let pid: u32 = proxy
+        .call("GetConnectionUnixProcessID", &(&owner,))
+        .await
+        .unwrap();
+    struct ActivatedRauc(u32);
+    impl Drop for ActivatedRauc {
+        fn drop(&mut self) {
+            // SAFETY: PID came from the unique RAUC owner on this disposable test bus.
+            unsafe {
+                libc::kill(self.0 as i32, libc::SIGTERM);
+            }
+        }
+    }
+    let native = ActivatedRauc(pid);
+    assert_eq!(updater.status().state, "idle", "{:?}", updater.status());
+    assert!(!gate.blocked());
+    assert!(!updater.configured());
+    let another = Updater::new(
+        connection.clone(),
+        &options,
+        Events::default(),
+        gate.clone(),
+        settings,
+        hooks,
+    )
+    .await
+    .unwrap();
+    assert_eq!(another.status().state, "idle");
+    assert_eq!(
+        proxy
+            .call::<_, _, String>("GetNameOwner", &(RAUC,))
+            .await
+            .unwrap(),
+        owner
+    );
+    drop(native);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while proxy
+            .call::<_, _, bool>("NameHasOwner", &(RAUC,))
+            .await
+            .unwrap()
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(updater.reconcile().await.is_err());
+    assert!(gate.blocked());
+    proxy.call::<_, _, String>("GetId", &()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), observation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        activation_count.load(Ordering::SeqCst),
+        1,
+        "already owned RAUC must not be activated again"
+    );
+}

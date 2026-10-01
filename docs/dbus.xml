@@ -135,6 +135,12 @@
         <arg name="retry" type="b" direction="in" />
         <arg type="s" direction="out" />
       </method>
+      <method name="InstallBundle">
+        <arg name="fd" type="h" direction="in" />
+        <arg name="ignore_certificate" type="b" direction="in" />
+        <arg name="retry" type="b" direction="in" />
+        <arg type="s" direction="out" />
+      </method>
       <method name="Reconcile">
     </method>
       <method name="Releases">

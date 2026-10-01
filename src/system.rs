@@ -166,39 +166,7 @@ impl System {
                 .insert(unit.into(), start);
             return Ok(());
         }
-        timeout(DBUS_LIMIT, async {
-            let proxy = Proxy::new(&self.connection, SYSTEMD, SYSTEMD_PATH, SYSTEMD_MANAGER)
-                .await
-                .map_err(failed)?;
-            let mut removed = proxy.receive_signal("JobRemoved").await.map_err(failed)?;
-            match proxy.call::<_, _, ()>("Subscribe", &()).await {
-                Ok(()) => {}
-                Err(zbus::Error::MethodError(name, _, _))
-                    if name.as_str() == "org.freedesktop.systemd1.AlreadySubscribed" => {}
-                Err(e) => return Err(failed(e)),
-            }
-            let job: OwnedObjectPath = proxy
-                .call(
-                    if start { "StartUnit" } else { "StopUnit" },
-                    &(unit, "replace"),
-                )
-                .await
-                .map_err(failed)?;
-            while let Some(signal) = removed.next().await {
-                let (_, path, name, result): (u32, OwnedObjectPath, String, String) =
-                    signal.body().deserialize().map_err(failed)?;
-                if path == job && name == unit {
-                    return if result == "done" {
-                        Ok(())
-                    } else {
-                        Err(failed(format!("{unit} job: {result}")))
-                    };
-                }
-            }
-            Err(failed("systemd disconnected while awaiting job"))
-        })
-        .await
-        .map_err(|_| failed(format!("{unit} job timed out")))?
+        unit_job_native(&self.connection, unit, start, DBUS_LIMIT).await
     }
 
     pub async fn set_time(&self, unix_microseconds: i64) -> fdo::Result<()> {
@@ -501,7 +469,7 @@ pub async fn validate_ssh_keys(raw: &str) -> fdo::Result<String> {
     .map_err(|_| failed("SSH key validation timed out"))?
 }
 
-fn validate_unit(unit: &str) -> fdo::Result<()> {
+pub(crate) fn validate_unit(unit: &str) -> fdo::Result<()> {
     if unit.is_empty()
         || unit.len() > 255
         || !unit
@@ -572,4 +540,47 @@ fn has_address() -> io::Result<bool> {
     })();
     unsafe { libc::freeifaddrs(head) };
     Ok(result)
+}
+
+/// Native systemd jobs, also used by the updater preparation helper.
+pub(crate) async fn unit_job_native(
+    connection: &Connection,
+    unit: &str,
+    start: bool,
+    limit: Duration,
+) -> fdo::Result<()> {
+    validate_unit(unit)?;
+    timeout(limit, async {
+        let proxy = Proxy::new(connection, SYSTEMD, SYSTEMD_PATH, SYSTEMD_MANAGER)
+            .await
+            .map_err(failed)?;
+        let mut removed = proxy.receive_signal("JobRemoved").await.map_err(failed)?;
+        match proxy.call::<_, _, ()>("Subscribe", &()).await {
+            Ok(()) => {}
+            Err(zbus::Error::MethodError(name, _, _))
+                if name.as_str() == "org.freedesktop.systemd1.AlreadySubscribed" => {}
+            Err(e) => return Err(failed(e)),
+        }
+        let job: OwnedObjectPath = proxy
+            .call(
+                if start { "StartUnit" } else { "StopUnit" },
+                &(unit, "replace"),
+            )
+            .await
+            .map_err(failed)?;
+        while let Some(signal) = removed.next().await {
+            let (_, path, name, result): (u32, OwnedObjectPath, String, String) =
+                signal.body().deserialize().map_err(failed)?;
+            if path == job && name == unit {
+                return if result == "done" {
+                    Ok(())
+                } else {
+                    Err(failed(format!("{unit} job: {result}")))
+                };
+            }
+        }
+        Err(failed("systemd disconnected while awaiting job"))
+    })
+    .await
+    .map_err(|_| failed(format!("{unit} job timed out")))?
 }

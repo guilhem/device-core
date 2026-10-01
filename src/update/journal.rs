@@ -15,6 +15,8 @@ pub(super) struct Pending {
     pub phase: String,
     pub automatic: bool,
     #[serde(default)]
+    pub local: bool,
+    #[serde(default)]
     pub operation_id: String,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,8 +79,11 @@ impl Journal {
                 .pending
                 .as_ref()
                 .map(|p| {
-                    catalog::version(&p.tag).is_some()
-                        && catalog::valid_hash(&p.sha256)
+                    (if p.local {
+                        super::manual::valid_version(&p.tag) && !p.automatic
+                    } else {
+                        catalog::version(&p.tag).is_some()
+                    }) && catalog::valid_hash(&p.sha256)
                         && !p.boot_id.is_empty()
                         && !other_slot(&p.from_slot).is_empty()
                         && p.to_slot == other_slot(&p.from_slot)
@@ -230,6 +235,7 @@ mod tests {
             boot_id: "boot-1".into(),
             phase: "installing".into(),
             automatic: true,
+            local: false,
             operation_id: "operation-1".into(),
         };
         // The injected writer performs the real replacement, then models its final fsync error.

@@ -3,6 +3,8 @@
 mod catalog;
 #[path = "update/journal.rs"]
 mod journal;
+#[path = "update/manual.rs"]
+mod manual;
 #[path = "update/rauc.rs"]
 mod rauc;
 #[path = "update/schedule.rs"]
@@ -15,7 +17,9 @@ use crate::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
+    fs::File,
     future::Future,
+    os::fd::AsFd,
     pin::Pin,
     sync::{Arc, Mutex},
     time::Duration,
@@ -23,7 +27,7 @@ use std::{
 use tokio::sync::{mpsc, oneshot, watch, Mutex as AsyncMutex};
 use zbus::{
     fdo,
-    zvariant::{OwnedValue, Type, Value},
+    zvariant::{Fd, OwnedValue, Type, Value},
     Connection,
 };
 
@@ -103,6 +107,9 @@ struct Data {
     maintenance: Option<String>,
     rebooted: bool,
     recovered: bool,
+    manual_cleanup: bool,
+    helper_cleanup: bool,
+    cleanup_owner: Option<String>,
 }
 struct Core {
     connection: Connection,
@@ -122,6 +129,12 @@ enum Command {
         tag: String,
         channel: String,
         automatic: bool,
+        retry: bool,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    InstallBundle {
+        file: File,
+        ignore_certificate: bool,
         retry: bool,
         reply: oneshot::Sender<Result<String, String>>,
     },
@@ -151,7 +164,15 @@ impl Updater {
             .inspect_err(|_| gate.set(true))?;
         let configured = catalog::valid_repo(&options.update_repo)
             && catalog::valid_asset(&options.update_asset);
-        let unsupported = !configured && j.is_empty();
+        if !options.update_prepare_unit.is_empty() {
+            crate::system::validate_unit(&options.update_prepare_unit)
+                .map_err(|e| e.to_string())?;
+        }
+        let unsupported = !configured
+            && j.is_empty()
+            && options.update_prepare_unit.is_empty()
+            && !options.data_dir.join("updates/manual.raucb").exists()
+            && matches!(rauc::available(&connection).await, Ok(false));
         // Optional absent updater configuration must not disable unrelated device services.
         // This constructor runs before exports: clear the parent's startup barrier if updates are absent.
         gate.set(!unsupported);
@@ -180,6 +201,9 @@ impl Updater {
                 maintenance: None,
                 rebooted: false,
                 recovered: unsupported,
+                manual_cleanup: options.data_dir.join("updates/manual.raucb").exists(),
+                helper_cleanup: !options.update_prepare_unit.is_empty(),
+                cleanup_owner: None,
             }),
             operation: Arc::new(AsyncMutex::new(())),
             checking: AsyncMutex::new(()),
@@ -240,6 +264,61 @@ impl Updater {
                                         });
                                     }
                                     // Probe even after a preparation error: another RAUC may have started.
+                                    if let Err(e) = job.recover().await {
+                                        job.set(|s| s.error = e);
+                                    }
+                                });
+                                let _ = reply.send(Ok(id));
+                            }
+                        }
+                    }
+                    Command::InstallBundle {
+                        file,
+                        ignore_certificate,
+                        retry,
+                        reply,
+                    } => {
+                        let result = core
+                            .validate_manual(ignore_certificate)
+                            .and_then(|()| {
+                                core.operation.clone().try_lock_owned().map_err(|_| {
+                                    "an update operation is already in progress".to_string()
+                                })
+                            })
+                            .and_then(|guard| {
+                                token().map(|id| (guard, id)).map_err(|e| e.to_string())
+                            });
+                        match result {
+                            Err(e) => {
+                                let _ = reply.send(Err(e));
+                            }
+                            Ok((guard, id)) => {
+                                core.set(|s| {
+                                    s.operation_id = id.clone();
+                                    s.error.clear();
+                                    s.progress = 0;
+                                    s.target.clear();
+                                });
+                                let job = core.clone();
+                                let operation_id = id.clone();
+                                tokio::spawn(async move {
+                                    let _guard = guard;
+                                    if let Err(e) = job
+                                        .install_manual(
+                                            file,
+                                            ignore_certificate,
+                                            retry,
+                                            &operation_id,
+                                        )
+                                        .await
+                                    {
+                                        job.set(|s| {
+                                            s.error = e;
+                                            if s.state == "downloading" {
+                                                s.state = "error".into();
+                                            }
+                                        });
+                                    }
                                     if let Err(e) = job.recover().await {
                                         job.set(|s| s.error = e);
                                     }
@@ -332,6 +411,27 @@ impl Updater {
             .map_err(|e| e.to_string())?;
         receive.await.map_err(|e| e.to_string())?
     }
+    /// Duplicate and validate the received descriptor before handing it to the actor.
+    pub async fn install_bundle(
+        &self,
+        fd: Fd<'_>,
+        ignore_certificate: bool,
+        retry: bool,
+    ) -> Result<String, String> {
+        let file = File::from(fd.as_fd().try_clone_to_owned().map_err(|e| e.to_string())?);
+        manual::validate_file(&file)?;
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::InstallBundle {
+                file,
+                ignore_certificate,
+                retry,
+                reply,
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        receive.await.map_err(|e| e.to_string())?
+    }
     pub async fn reconcile(&self) -> Result<(), String> {
         let (send, receive) = oneshot::channel();
         self.commands
@@ -379,6 +479,17 @@ impl Updater {
             .await
             .map_err(fdo::Error::Failed)
     }
+    #[zbus(name = "InstallBundle")]
+    async fn dbus_install_bundle(
+        &self,
+        fd: Fd<'_>,
+        ignore_certificate: bool,
+        retry: bool,
+    ) -> fdo::Result<String> {
+        self.install_bundle(fd, ignore_certificate, retry)
+            .await
+            .map_err(fdo::Error::Failed)
+    }
     #[zbus(name = "Reconcile")]
     async fn dbus_reconcile(&self) -> fdo::Result<()> {
         self.reconcile().await.map_err(fdo::Error::Failed)
@@ -404,7 +515,7 @@ impl Core {
         s.last_result = j.last_result.clone();
         s.last_window = j.last_window.clone();
         s.suspended = !j.suspended.is_empty() || catalog::version(&s.current).is_none();
-        s.retry_required = !j.suspended.is_empty();
+        s.retry_required = !j.suspended.is_empty() || j.blocked.contains_key(&j.target);
         if s.target.is_empty() {
             s.target = j.target.clone();
         }
@@ -542,6 +653,7 @@ impl Core {
             }
             return Ok(());
         }
+        self.cleanup_manual(&boot).await?;
         self.release_idle(&boot).await?;
         self.data.lock().unwrap().recovered = true;
         Ok(())
@@ -654,6 +766,7 @@ impl Core {
         retry: bool,
         id: &str,
     ) -> Result<(), String> {
+        self.recover().await?;
         self.admit(tag, automatic, retry).await?;
         let window = self.before(channel, automatic, id).await?;
         if automatic && !self.claim_window(&window)? {
@@ -680,10 +793,25 @@ impl Core {
             return Err("automatic window changed during download".into());
         }
         let boot = self.admit(tag, automatic, retry).await?;
+        self.install_prepared(tag, channel, automatic, false, id, &path, &sum, &boot)
+            .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn install_prepared(
+        &self,
+        tag: &str,
+        channel: &str,
+        automatic: bool,
+        local: bool,
+        id: &str,
+        path: &std::path::Path,
+        sum: &str,
+        boot: &rauc::BootState,
+    ) -> Result<(), String> {
         self.commit(|j| {
             j.pending = Some(journal::Pending {
                 tag: tag.into(),
-                sha256: sum.clone(),
+                sha256: sum.into(),
                 from: self.options.image_version.clone(),
                 from_slot: boot.slot.clone(),
                 to_slot: journal::other_slot(&boot.slot).into(),
@@ -691,6 +819,7 @@ impl Core {
                 boot_id: boot.boot_id.clone(),
                 phase: "installing".into(),
                 automatic,
+                local,
                 operation_id: id.into(),
             });
             j.target = tag.into();
@@ -700,7 +829,7 @@ impl Core {
             s.state = "installing".into();
             s.progress = 0;
         });
-        let result = rauc::install(&self.connection, &path, &boot.owner, |p| {
+        let result = rauc::install(&self.connection, path, &boot.owner, |p| {
             self.set(|s| s.progress = p)
         })
         .await;
@@ -733,7 +862,9 @@ impl Core {
                     s.state = "error".into();
                     s.error = e.clone();
                 });
-                let _ = tokio::fs::remove_file(&path).await;
+                if !local {
+                    let _ = tokio::fs::remove_file(path).await;
+                }
                 return Err(e);
             }
             rauc::Outcome::Unknown(e) => {
@@ -741,8 +872,8 @@ impl Core {
             }
         }
         let after = rauc::probe(&self.connection, &self.options).await?;
-        if after.operation == "idle" {
-            tokio::fs::remove_file(&path)
+        if !local && after.operation == "idle" && after.owner == boot.owner {
+            tokio::fs::remove_file(path)
                 .await
                 .map_err(|e| e.to_string())?;
         }
