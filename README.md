@@ -69,9 +69,9 @@ From a checkout of this repository, build and start the daemon:
 ```sh
 cargo build --locked
 
+export DEVICE_CORE_DATA_DIR="$(mktemp -d)"
 dbus-run-session -- sh -c '
   export DEVICE_CORE_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS"
-  export DEVICE_CORE_DATA_DIR="$(mktemp -d)"
   export DEVICE_CORE_NETWORK_GUARD="$DEVICE_CORE_DATA_DIR/network.lock"
   export DEVICE_CORE_HTTP_ADDR=127.0.0.1:8081
   exec ./target/debug/device-core --simulate
@@ -107,7 +107,13 @@ curl -N http://127.0.0.1:8081/v1/events
 ```
 
 Press Ctrl+C to stop the event stream or daemon. The private bus exits with the
-daemon; the temporary settings directory can be removed when you finish.
+daemon. In the terminal where you started the daemon, remove its temporary settings:
+
+```sh
+rm -r -- "$DEVICE_CORE_DATA_DIR"
+unset DEVICE_CORE_DATA_DIR
+```
+
 Runtime volume changes are temporary. Use Config to save the desired volume.
 
 ## Install on your device
