@@ -254,7 +254,8 @@ pub async fn start(options: Options) -> Result<App, Box<dyn std::error::Error>> 
         });
     }
     // Publish the name only after every object and recovery task exists.
-    bus.request_name(SERVICE).await?;
+    bus.request_name_with_flags(SERVICE, zbus::fdo::RequestNameFlags::DoNotQueue.into())
+        .await?;
     app.manager.ready.store(true, Ordering::SeqCst);
     Ok(app)
 }
