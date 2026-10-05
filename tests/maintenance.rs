@@ -1,6 +1,7 @@
 use device_core::{
-    common::{Events, Gate},
+    common::{Events, Gate, ROOT},
     maintenance::Coordinator,
+    manager::Manager,
     options::Options,
 };
 use std::{
@@ -11,44 +12,7 @@ use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
 };
-use zbus::{fdo, message::Header, zvariant::OwnedObjectPath, Connection};
-
-struct Systemd;
-#[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
-impl Systemd {
-    #[zbus(name = "GetUnitByPIDFD")]
-    async fn get_unit_by_pidfd(
-        &self,
-        fd: zbus::zvariant::OwnedFd,
-    ) -> (OwnedObjectPath, String, Vec<u8>) {
-        use std::os::fd::AsRawFd;
-        assert_eq!(
-            unsafe {
-                libc::syscall(
-                    libc::SYS_pidfd_send_signal,
-                    fd.as_raw_fd(),
-                    0,
-                    std::ptr::null::<libc::siginfo_t>(),
-                    0,
-                )
-            },
-            0
-        );
-        (
-            "/org/freedesktop/systemd1/unit/client".try_into().unwrap(),
-            "client.service".into(),
-            vec![0; 16],
-        )
-    }
-}
-struct Unit;
-#[zbus::interface(name = "org.freedesktop.systemd1.Unit")]
-impl Unit {
-    #[zbus(property)]
-    fn id(&self) -> &str {
-        "client.service"
-    }
-}
+use zbus::{fdo, message::Header, zvariant::OwnedObjectPath, Connection, Proxy};
 
 #[derive(Default)]
 struct State {
@@ -116,6 +80,18 @@ impl Agent {
         Ok(())
     }
 }
+fn current_user() -> String {
+    String::from_utf8(
+        std::process::Command::new("id")
+            .arg("-un")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .into()
+}
 async fn connection(address: &str) -> Connection {
     zbus::connection::Builder::address(address)
         .unwrap()
@@ -145,14 +121,21 @@ async fn agent(
         .unwrap();
     (bus, state)
 }
-async fn register(coordinator: &Coordinator, agent: &Connection) {
-    coordinator
-        .register(
-            agent.unique_name().unwrap().as_str(),
-            "/agent".try_into().unwrap(),
-        )
-        .await
-        .unwrap();
+async fn register(server: &Connection, agent: &Connection) {
+    Proxy::new(
+        agent,
+        server.unique_name().unwrap(),
+        ROOT,
+        "io.github.guilhem.DeviceCore1.Manager",
+    )
+    .await
+    .unwrap()
+    .call::<_, _, ()>(
+        "RegisterAgent",
+        &(OwnedObjectPath::try_from("/agent").unwrap(),),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -169,28 +152,33 @@ async fn reservations_and_failed_acquisitions_follow_authorized_agent_restarts()
         .await
         .unwrap()
         .unwrap();
-    let systemd = connection(&address).await;
-    systemd
-        .object_server()
-        .at("/org/freedesktop/systemd1", Systemd)
-        .await
-        .unwrap();
-    systemd
-        .object_server()
-        .at("/org/freedesktop/systemd1/unit/client", Unit)
-        .await
-        .unwrap();
-    systemd
-        .request_name("org.freedesktop.systemd1")
-        .await
-        .unwrap();
     let server = connection(&address).await;
     let mut options = Options::from_env(true);
-    options.maintenance_units = vec!["client.service".into()];
+    options.maintenance_users = vec![current_user()];
     let gate = Gate::default();
-    let coordinator = Coordinator::new(server.clone(), options, gate.clone(), Events::default());
+    let coordinator = Coordinator::new(
+        server.clone(),
+        options.clone(),
+        gate.clone(),
+        Events::default(),
+    );
+    server
+        .object_server()
+        .at(
+            ROOT,
+            Manager {
+                coordinator: coordinator.clone(),
+                options,
+                gate: gate.clone(),
+                events: Events::default(),
+                instance: "test".into(),
+                ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            },
+        )
+        .await
+        .unwrap();
     let (old, old_state) = agent(&address, &server, "old", false).await;
-    register(&coordinator, &old).await;
+    register(&server, &old).await;
     let mut reservation = coordinator.acquire("install-1").await.unwrap();
     assert!(old_state.lock().unwrap().held.is_some());
     let old_sender = old.unique_name().unwrap().to_string();
@@ -199,7 +187,9 @@ async fn reservations_and_failed_acquisitions_follow_authorized_agent_restarts()
     assert!(reservation.release().await.is_err());
     assert!(gate.blocked());
     let (new, new_state) = agent(&address, &server, "new", false).await;
-    register(&coordinator, &new).await;
+    register(&server, &new).await;
+    // Delayed owner-loss handling for the old unique name must retain its replacement.
+    coordinator.lost(&old_sender);
     reservation.release().await.unwrap();
     assert!(!gate.blocked());
     assert_eq!(
@@ -212,7 +202,7 @@ async fn reservations_and_failed_acquisitions_follow_authorized_agent_restarts()
     coordinator.lost(&new_sender);
 
     let (failing, _) = agent(&address, &server, "failing", true).await;
-    register(&coordinator, &failing).await;
+    register(&server, &failing).await;
     assert!(coordinator.acquire("install-2").await.is_err());
     assert!(gate.blocked());
     let sender = failing.unique_name().unwrap().to_string();
@@ -220,11 +210,47 @@ async fn reservations_and_failed_acquisitions_follow_authorized_agent_restarts()
     coordinator.lost(&sender);
     assert!(coordinator.abort_pending("install-2").await.is_err());
     let (replacement, replacement_state) = agent(&address, &server, "replacement", false).await;
-    register(&coordinator, &replacement).await;
+    register(&server, &replacement).await;
     coordinator.abort_pending("install-2").await.unwrap();
     coordinator.abort_pending("install-2").await.unwrap();
     assert_eq!(replacement_state.lock().unwrap().aborted, ["install-2"]);
     // Only the updater, after a conclusive RAUC probe, may reopen this gate.
     assert!(gate.blocked());
+    // This is one account with successive connections, not two service identities.
+    let mismatch = if unsafe { libc::geteuid() } == 0 {
+        "nobody"
+    } else {
+        "root"
+    };
+    assert_ne!(device_core::auth::user_uid(mismatch).unwrap(), unsafe {
+        libc::geteuid()
+    });
+    for users in [
+        vec![],
+        vec![mismatch.into()],
+        vec![current_user(), "device-core-no-such-account".into()],
+        vec![current_user(), String::new()],
+        vec![current_user(), current_user()],
+    ] {
+        let mut options = Options::from_env(true);
+        options.maintenance_users = users;
+        let restricted =
+            Coordinator::new(server.clone(), options, Gate::default(), Events::default());
+        let denied = restricted
+            .register(
+                replacement.unique_name().unwrap().as_str(),
+                "/agent".try_into().unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(denied, fdo::Error::AccessDenied(_)), "{denied}");
+    }
+    assert!(coordinator
+        .register(
+            "io.github.guilhem.DeviceCore1",
+            "/agent".try_into().unwrap()
+        )
+        .await
+        .is_err());
     bus.kill().await.unwrap();
 }

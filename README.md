@@ -151,18 +151,32 @@ Configure these before running the daemon without `--simulate`:
 | --- | --- |
 | **Persistent storage** | A writable `DEVICE_CORE_DATA_DIR` for settings and journals. Default: `/var/lib/device-core`; NabOS uses `/data/device-core`. |
 | **Runtime directories** | A stable network lock under `/run` and a working directory under `/run`. Keep the lock file in place across daemon restarts. |
-| **D-Bus authorization** | Narrow system-bus and polkit permissions. Linux caller authorization requires process descriptors (`GetConnectionCredentials.ProcessFD`) and systemd 255+ (`GetUnitByPIDFD`). |
-| **Networking** | NetworkManager and a Wi-Fi interface. Configure `DEVICE_CORE_PRESENCE_UNIT` when physical-presence authorization is needed for setup. |
+| **D-Bus authorization** | Narrow system-bus and polkit permissions. Presence and maintenance authorization compares the bus-supplied Unix UID with configured dedicated account names. |
+| **Networking** | NetworkManager and a Wi-Fi interface. Configure `DEVICE_CORE_PRESENCE_USER` when physical-presence authorization is needed for setup. |
 | **Audio** | The correct PipeWire session, ALSA output, `mpg123`, `aplay` and `wpctl`. Configure `DEVICE_CORE_ALSA_DEVICE` and approved `DEVICE_CORE_AUDIO_ROOTS`. |
 | **SSH keys** | `ssh-keygen` for public-key validation. |
 | **Voice, if used** | Linux Voice Assistant and `DEVICE_CORE_LVA_UNIT`. |
 | **Online updates, if used** | RAUC, `DEVICE_CORE_UPDATE_REPO` and `DEVICE_CORE_UPDATE_ASSET`, plus the image's update and boot-health integration. |
-| **Product maintenance, if used** | Participating systemd services listed in `DEVICE_CORE_MAINTENANCE_UNITS`. |
+| **Product maintenance, if used** | Dedicated product accounts listed in `DEVICE_CORE_MAINTENANCE_USERS` (colon-separated). |
 
 The default transport is the system D-Bus. **HTTP has no authentication and is
 disabled by default.** Setting `DEVICE_CORE_HTTP_ADDR` enables control endpoints,
 including power and SSH settings. Keep it on loopback for local use; remote access
 needs an authenticated access layer supplied by your integration.
+
+Create the configured accounts before starting device-core. Presence reporting is
+disabled when `DEVICE_CORE_PRESENCE_USER` is unset or empty; an unset or empty
+`DEVICE_CORE_MAINTENANCE_USERS` requires no product agents. Unknown accounts,
+empty list entries and duplicate maintenance UIDs prevent startup, including in
+simulation. Services sharing a Unix UID share authorization, so use a separate
+account for each maintenance participant.
+
+This is a breaking configuration change: `DEVICE_CORE_PRESENCE_UNIT` becomes
+`DEVICE_CORE_PRESENCE_USER`, and `DEVICE_CORE_MAINTENANCE_UNITS` becomes
+`DEVICE_CORE_MAINTENANCE_USERS`. Rust integrations use `presence_user` and
+`maintenance_users`. Legacy variables are ignored; there is no systemd-unit
+fallback. Existing images must migrate service accounts and storage ownership.
+Access to that state after rolling back to an older image is unsupported.
 
 Use narrow service permissions; device-core does not need raw hardware
 capabilities. On an immutable image, place persistent state on a writable data

@@ -1,4 +1,4 @@
-use crate::auth::sender_unit;
+use crate::auth::{sender_uid, user_uid};
 use crate::common::{Events, Gate};
 use crate::options::Options;
 use std::collections::HashMap;
@@ -21,7 +21,7 @@ pub struct Coordinator {
 
 #[derive(Clone)]
 struct Agent {
-    unit: String,
+    user: String,
     sender: String,
     path: OwnedObjectPath,
 }
@@ -47,14 +47,20 @@ impl Coordinator {
     }
 
     pub async fn register(&self, sender: &str, path: OwnedObjectPath) -> fdo::Result<()> {
-        let unit = sender_unit(&self.connection, sender).await?;
-        if !self.options.maintenance_units.contains(&unit) {
-            return Err(fdo::Error::AccessDenied("unauthorized-agent".into()));
+        self.options.validate_users()?;
+        let uid = sender_uid(&self.connection, sender).await?;
+        let mut authorized = None;
+        for user in &self.options.maintenance_users {
+            if user_uid(user)? == uid {
+                authorized = Some(user.clone());
+            }
         }
+        let user =
+            authorized.ok_or_else(|| fdo::Error::AccessDenied("unauthorized-agent".into()))?;
         self.agents.lock().unwrap().insert(
-            unit.clone(),
+            user.clone(),
             Agent {
-                unit,
+                user,
                 sender: sender.into(),
                 path,
             },
@@ -69,11 +75,11 @@ impl Coordinator {
             .retain(|_, agent| agent.sender != sender);
     }
 
-    fn current(&self, unit: &str) -> fdo::Result<Agent> {
+    fn current(&self, user: &str) -> fdo::Result<Agent> {
         self.agents
             .lock()
             .unwrap()
-            .get(unit)
+            .get(user)
             .cloned()
             .ok_or_else(|| fdo::Error::Failed("maintenance-agent-unavailable".into()))
     }
@@ -88,11 +94,11 @@ impl Coordinator {
         let agents: Vec<Agent> = {
             let available = self.agents.lock().unwrap();
             self.options
-                .maintenance_units
+                .maintenance_users
                 .iter()
-                .map(|unit| {
+                .map(|user| {
                     available
-                        .get(unit)
+                        .get(user)
                         .cloned()
                         .ok_or_else(|| fdo::Error::Failed("maintenance-agent-unavailable".into()))
                 })
@@ -102,7 +108,7 @@ impl Coordinator {
         let mut acquired = Vec::new();
         let mut contacted = Vec::new();
         for agent in agents {
-            contacted.push(agent.unit.clone());
+            contacted.push(agent.user.clone());
             let request = async {
                 let proxy = Proxy::new(
                     &self.connection,
@@ -140,8 +146,8 @@ impl Coordinator {
         if id != operation {
             return Err(fdo::Error::Failed("maintenance-rollback-pending".into()));
         }
-        for unit in agents {
-            let agent = self.current(&unit)?;
+        for user in agents {
+            let agent = self.current(&user)?;
             let abort = async {
                 let proxy = Proxy::new(
                     &self.connection,
@@ -166,7 +172,7 @@ impl Coordinator {
         agents: &mut [(Agent, String)],
     ) -> fdo::Result<()> {
         for (agent, token) in agents {
-            let current = self.current(&agent.unit)?;
+            let current = self.current(&agent.user)?;
             if current.sender != agent.sender || current.path != agent.path {
                 // A replacement process owns its own reservation, never the old process's token.
                 let acquire = async {

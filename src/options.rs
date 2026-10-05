@@ -9,8 +9,8 @@ pub struct Options {
     pub alsa_device: String,
     pub audio_roots: Vec<PathBuf>,
     pub sim_audio_ms: u64,
-    pub presence_unit: String,
-    pub maintenance_units: Vec<String>,
+    pub presence_user: String,
+    pub maintenance_users: Vec<String>,
     pub hotspot_uuid: String,
     pub hotspot_address: String,
     pub hotspot_prefix: String,
@@ -32,11 +32,16 @@ pub struct Options {
 }
 
 fn env(name: &str, default: &str) -> String {
-    std::env::var(name).unwrap_or_else(|_| default.into())
+    match std::env::var(name) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => default.into(),
+        Err(_) => panic!("invalid {name}: non-Unicode value"),
+    }
 }
 impl Options {
     pub fn from_env(simulate: bool) -> Self {
         let data_dir = PathBuf::from(env("DEVICE_CORE_DATA_DIR", "/var/lib/device-core"));
+        let maintenance_users = env("DEVICE_CORE_MAINTENANCE_USERS", "");
         Self {
             simulate,
             data_dir,
@@ -51,12 +56,12 @@ impl Options {
                 .map(PathBuf::from)
                 .collect(),
             sim_audio_ms: env("DEVICE_CORE_SIM_AUDIO_MS", "50").parse().unwrap_or(50),
-            presence_unit: env("DEVICE_CORE_PRESENCE_UNIT", ""),
-            maintenance_units: env("DEVICE_CORE_MAINTENANCE_UNITS", "")
-                .split(':')
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect(),
+            presence_user: env("DEVICE_CORE_PRESENCE_USER", ""),
+            maintenance_users: if maintenance_users.is_empty() {
+                Vec::new()
+            } else {
+                maintenance_users.split(':').map(String::from).collect()
+            },
             hotspot_uuid: env(
                 "DEVICE_CORE_HOTSPOT_UUID",
                 "64657669-6365-4000-8000-000000000001",
@@ -87,5 +92,20 @@ impl Options {
             .into(),
             net_probe: env("DEVICE_CORE_NET_PROBE", "api.github.com:443"),
         }
+    }
+
+    pub(crate) fn validate_users(&self) -> zbus::fdo::Result<()> {
+        if !self.presence_user.is_empty() {
+            crate::auth::user_uid(&self.presence_user)?;
+        }
+        let mut uids = std::collections::HashSet::new();
+        for user in &self.maintenance_users {
+            if !uids.insert(crate::auth::user_uid(user)?) {
+                return Err(zbus::fdo::Error::AccessDenied(
+                    "duplicate-maintenance-user".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 }

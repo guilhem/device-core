@@ -9,6 +9,53 @@ use std::{
 };
 use zbus::{fdo::DBusProxy, Connection};
 
+#[test]
+fn invalid_account_configuration_never_starts_even_in_simulation() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    for simulate in [false, true] {
+        for (variable, value) in [
+            (
+                "DEVICE_CORE_PRESENCE_USER",
+                OsString::from("device-core-no-such-account"),
+            ),
+            (
+                "DEVICE_CORE_MAINTENANCE_USERS",
+                OsString::from("root:device-core-no-such-account"),
+            ),
+            ("DEVICE_CORE_MAINTENANCE_USERS", OsString::from(":")),
+            ("DEVICE_CORE_MAINTENANCE_USERS", OsString::from("root:")),
+            ("DEVICE_CORE_MAINTENANCE_USERS", OsString::from(":root")),
+            (
+                "DEVICE_CORE_MAINTENANCE_USERS",
+                OsString::from("root::nobody"),
+            ),
+            ("DEVICE_CORE_MAINTENANCE_USERS", OsString::from("root:root")),
+            ("DEVICE_CORE_PRESENCE_USER", OsString::from_vec(vec![0xff])),
+            (
+                "DEVICE_CORE_MAINTENANCE_USERS",
+                OsString::from_vec(vec![0xff]),
+            ),
+        ] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_device-core"));
+            command.env_clear().env(variable, value);
+            if simulate {
+                command.arg("--simulate");
+            }
+            let output = command.output().unwrap();
+            assert!(!output.status.success(), "{variable} simulate={simulate}");
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(
+                error.contains("user") || error.contains(variable),
+                "{error}"
+            );
+            assert!(
+                !error.contains("simulation requires"),
+                "configuration must be checked before connecting: {error}"
+            );
+        }
+    }
+}
+
 struct Process(Child);
 impl Drop for Process {
     fn drop(&mut self) {
@@ -33,7 +80,8 @@ fn daemon(address: &str, root: &Directory, name: &str) -> Process {
                 root.0.join(format!("{name}-guard")),
             )
             .env("DEVICE_CORE_HTTP_ADDR", "")
-            .env("DEVICE_CORE_MAINTENANCE_UNITS", "")
+            .env("DEVICE_CORE_MAINTENANCE_USERS", "")
+            .env("DEVICE_CORE_PRESENCE_USER", "")
             .env("DEVICE_CORE_UPDATE_REPO", "")
             .env("DEVICE_CORE_UPDATE_ASSET", "")
             .stdout(Stdio::null())
@@ -68,7 +116,8 @@ async fn daemon_refuses_replacement_and_does_not_replace_an_existing_owner() {
     let root =
         Directory(std::env::temp_dir().join(format!("device-core-name-{}", token().unwrap())));
     fs::create_dir(&root.0).unwrap();
-    let address = format!("unix:path={}", root.0.join("bus").display());
+    // Let D-Bus allocate a short socket name even under a long build TMPDIR.
+    let address = format!("unix:tmpdir={}", std::env::temp_dir().display());
     let mut private = Process(
         Command::new("dbus-daemon")
             .args([
@@ -86,13 +135,14 @@ async fn daemon_refuses_replacement_and_does_not_replace_an_existing_owner() {
     BufReader::new(private.0.stdout.take().unwrap())
         .read_line(&mut ready)
         .unwrap();
-    assert!(ready.starts_with(&address));
-    let contender = zbus::connection::Builder::address(address.as_str())
+    assert!(ready.starts_with("unix:"), "{ready}");
+    let address = ready.trim();
+    let contender = zbus::connection::Builder::address(address)
         .unwrap()
         .build()
         .await
         .unwrap();
-    let original = daemon(&address, &root, "original");
+    let original = daemon(address, &root, "original");
     let original_owner = wait_owner(&contender).await;
     assert!(
         contender.request_name(SERVICE).await.is_err(),
@@ -109,7 +159,7 @@ async fn daemon_refuses_replacement_and_does_not_replace_an_existing_owner() {
     .unwrap();
     // This owner explicitly allows replacement; the daemon still must not replace it.
     contender.request_name(SERVICE).await.unwrap();
-    let mut duplicate = daemon(&address, &root, "duplicate");
+    let mut duplicate = daemon(address, &root, "duplicate");
     let status = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Some(status) = duplicate.0.try_wait().unwrap() {
@@ -129,6 +179,6 @@ async fn daemon_refuses_replacement_and_does_not_replace_an_existing_owner() {
         contender.unique_name().unwrap().as_str()
     );
     contender.release_name(SERVICE).await.unwrap();
-    let _restarted = daemon(&address, &root, "restarted");
+    let _restarted = daemon(address, &root, "restarted");
     assert_ne!(wait_owner(&contender).await, original_owner);
 }

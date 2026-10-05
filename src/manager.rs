@@ -51,7 +51,7 @@ impl Manager {
         if !self.options.lva_unit.is_empty() {
             capabilities.push("voice".into());
         }
-        if !self.options.maintenance_units.is_empty() {
+        if !self.options.maintenance_users.is_empty() {
             capabilities.push("maintenance-agents".into());
         }
         capabilities

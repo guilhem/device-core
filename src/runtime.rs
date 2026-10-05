@@ -48,6 +48,7 @@ fn update_settings(settings: &Settings, system: &System) -> update::Settings {
 }
 
 pub async fn start(options: Options) -> Result<App, Box<dyn std::error::Error>> {
+    options.validate_users()?;
     let address = std::env::var("DEVICE_CORE_BUS_ADDRESS")
         .ok()
         .or_else(|| std::env::var("DBUS_SYSTEM_BUS_ADDRESS").ok());
