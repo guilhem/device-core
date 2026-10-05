@@ -464,7 +464,7 @@ impl Network {
         #[zbus(connection)] bus: &Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<()> {
-        crate::auth::authorize_unit(bus, &header, &self.options.presence_unit).await?;
+        crate::auth::authorize_user(bus, &header, &self.options.presence_user).await?;
         self.shared
             .lock()
             .unwrap()

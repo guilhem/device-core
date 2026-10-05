@@ -1,36 +1,50 @@
-use std::time::Duration;
-use zbus::{fdo, message::Header, zvariant::OwnedObjectPath, Connection, Proxy};
+use std::{ffi::CString, mem::MaybeUninit, time::Duration};
+use zbus::{fdo, message::Header, names::UniqueName, Connection};
 
-/// Resolve credentials supplied by the bus, never a caller-supplied process ID.
-pub async fn sender_unit(connection: &Connection, sender: &str) -> fdo::Result<String> {
-    let lookup = async {
-        let bus = fdo::DBusProxy::new(connection).await?;
-        let credentials = bus.get_connection_credentials(sender.try_into()?).await?;
-        let process = credentials
-            .process_fd()
-            .ok_or_else(|| zbus::Error::Failure("missing ProcessFD".into()))?;
-        let manager = Proxy::new(
-            connection,
-            "org.freedesktop.systemd1",
-            "/org/freedesktop/systemd1",
-            "org.freedesktop.systemd1.Manager",
-        )
-        .await?;
-        // A pidfd pins the original process; a PID can be reused during lookup.
-        let (path, unit_id, _invocation): (OwnedObjectPath, String, Vec<u8>) =
-            manager.call("GetUnitByPIDFD", &(process,)).await?;
-        let unit = Proxy::new(
-            connection,
-            "org.freedesktop.systemd1",
-            path,
-            "org.freedesktop.systemd1.Unit",
-        )
-        .await?;
-        let id: String = unit.get_property("Id").await?;
-        if id.is_empty() || id != unit_id {
-            return Err(zbus::Error::Failure("unit identity changed".into()));
+/// Resolve a configured account name through NSS, never interpret it as a UID.
+pub fn user_uid(user: &str) -> fdo::Result<u32> {
+    let name = CString::new(user)
+        .ok()
+        .filter(|_| !user.is_empty())
+        .ok_or_else(|| fdo::Error::AccessDenied("invalid-user".into()))?;
+    let mut buffer = vec![0u8; 1024];
+    loop {
+        let mut entry = MaybeUninit::<libc::passwd>::uninit();
+        let mut result = std::ptr::null_mut();
+        // getpwnam_r writes into entry and buffer; no shared passwd storage is used.
+        let error = unsafe {
+            libc::getpwnam_r(
+                name.as_ptr(),
+                entry.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if error == libc::ERANGE {
+            let size = buffer
+                .len()
+                .checked_mul(2)
+                .ok_or_else(|| fdo::Error::AccessDenied("user-unavailable".into()))?;
+            buffer.resize(size, 0);
+            continue;
         }
-        Ok::<_, zbus::Error>(id)
+        if error != 0 || result.is_null() {
+            return Err(fdo::Error::AccessDenied(format!(
+                "user-unavailable: {user}"
+            )));
+        }
+        // A successful lookup with a non-null result initialized entry.
+        return Ok(unsafe { entry.assume_init() }.pw_uid);
+    }
+}
+
+/// Only the bus's authenticated Unix UID for this exact connection is authority.
+pub async fn sender_uid(connection: &Connection, sender: &str) -> fdo::Result<u32> {
+    let lookup = async {
+        let sender = UniqueName::try_from(sender)?;
+        let bus = fdo::DBusProxy::new(connection).await?;
+        Ok::<_, zbus::Error>(bus.get_connection_unix_user(sender.into()).await?)
     };
     tokio::time::timeout(Duration::from_secs(3), lookup)
         .await
@@ -38,7 +52,7 @@ pub async fn sender_unit(connection: &Connection, sender: &str) -> fdo::Result<S
         .map_err(|_| fdo::Error::AccessDenied("sender-unavailable".into()))
 }
 
-pub async fn authorize_unit(
+pub async fn authorize_user(
     connection: &Connection,
     header: &Header<'_>,
     expected: &str,
@@ -47,8 +61,27 @@ pub async fn authorize_unit(
         .sender()
         .ok_or_else(|| fdo::Error::AccessDenied("missing-sender".into()))?
         .to_string();
-    if expected.is_empty() || sender_unit(connection, &sender).await? != expected {
-        return Err(fdo::Error::AccessDenied("unauthorized-unit".into()));
+    if sender_uid(connection, &sender).await? != user_uid(expected)? {
+        return Err(fdo::Error::AccessDenied("unauthorized-user".into()));
     }
     Ok(sender)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_users_are_names_and_lookup_fails_closed() {
+        assert_eq!(user_uid("root").unwrap(), 0);
+        for user in [
+            "",
+            "root\0other",
+            "0",
+            "device-core-no-such-account",
+            "root:nobody",
+        ] {
+            assert!(user_uid(user).is_err(), "{user:?}");
+        }
+    }
 }

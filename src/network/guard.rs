@@ -59,10 +59,29 @@ impl Guard {
 }
 
 #[cfg(test)]
+pub(super) async fn wait_for_exclusive(guard: &Guard) -> Exclusive {
+    // O_CLOEXEC still permits a concurrent fork to retain a shared description
+    // until exec. Wait for its last copy; never unlock a client-owned description.
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match guard.exclusive() {
+                Ok(lock) => return lock,
+                Err("network-guard-busy") => {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                Err(error) => panic!("{error}"),
+            }
+        }
+    })
+    .await
+    .expect("shared guard was never released")
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn inherited_exclusive_description_cannot_prolong_finished_operation() {
+    #[tokio::test]
+    async fn inherited_exclusive_description_cannot_prolong_finished_operation() {
         let path = std::env::temp_dir().join(format!(
             "device-core-exclusive-{}",
             crate::common::token().unwrap()
@@ -81,7 +100,7 @@ mod tests {
             "a shared exported duplicate must retain its lock"
         );
         drop(client);
-        guard.exclusive().unwrap();
+        drop(wait_for_exclusive(&guard).await);
         drop(inherited);
         std::fs::remove_file(path).unwrap();
     }

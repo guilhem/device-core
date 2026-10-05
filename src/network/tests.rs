@@ -3,7 +3,6 @@ const HOTSPOT_UUID: &str = "64657669-6365-4000-8000-000000000001";
 const HOTSPOT_ADDRESS: &str = "10.41.0.1";
 fn test_options() -> Options {
     let mut o = Options::from_env(false);
-    o.presence_unit = "peripheral.service".into();
     o.hotspot_uuid = HOTSPOT_UUID.into();
     o.hotspot_address = HOTSPOT_ADDRESS.into();
     o.network_guard =
@@ -2007,8 +2006,18 @@ async fn private_bus_shared_guard_fd_survives_server_restart_and_blocks_recovery
     );
     assert_eq!(state.lock().unwrap().activation_count, 0);
     assert_eq!(state.lock().unwrap().saved_count, 0);
+    // Model a concurrent fork retaining a shared descriptor until exec.
+    use std::os::fd::AsFd;
+    let inherited = fd.as_fd().try_clone_to_owned().unwrap();
+    let inherited = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(inherited);
+    });
     drop(fd);
+    assert!(fresh.guard.exclusive().is_err());
+    drop(guard::wait_for_exclusive(&fresh.guard).await);
     fresh.reconcile_inner().await.unwrap();
+    inherited.await.unwrap();
     assert!(fresh_api.status().ready);
     assert_ne!(fresh_api.status().generation, status.generation);
     assert!(fresh_api.acquire_guard(&status.generation).is_err());
@@ -2017,133 +2026,108 @@ async fn private_bus_shared_guard_fd_survives_server_restart_and_blocks_recovery
         .unwrap();
     assert!(fresh.guard.exclusive().is_err());
     drop(fd);
-    fresh.guard.exclusive().unwrap();
+    drop(guard::wait_for_exclusive(&fresh.guard).await);
     drop(fresh);
     drop(fresh_api);
     std::fs::remove_file(options.network_guard).unwrap();
 }
 
-struct PresenceManager {
-    pids: Arc<Mutex<Vec<u32>>>,
-    unit: Arc<Mutex<String>>,
-}
-#[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
-impl PresenceManager {
-    #[zbus(name = "GetUnitByPIDFD")]
-    fn get_unit_by_pidfd(&self, fd: zbus::zvariant::OwnedFd) -> (OwnedObjectPath, String, Vec<u8>) {
-        use std::os::fd::AsRawFd;
-        let info =
-            std::fs::read_to_string(format!("/proc/self/fdinfo/{}", fd.as_raw_fd())).unwrap();
-        let pid = info
-            .lines()
-            .find_map(|line| line.strip_prefix("Pid:\t"))
-            .unwrap()
-            .parse()
-            .unwrap();
-        self.pids.lock().unwrap().push(pid);
-        (
-            path("/org/freedesktop/systemd1/unit/peripheral"),
-            self.unit.lock().unwrap().clone(),
-            vec![0; 16],
-        )
-    }
-}
-struct PresenceUnit(Arc<Mutex<String>>);
-#[zbus::interface(name = "org.freedesktop.systemd1.Unit")]
-impl PresenceUnit {
-    #[zbus(property)]
-    fn id(&self) -> String {
-        self.0.lock().unwrap().clone()
-    }
-}
-
 #[tokio::test]
-async fn private_bus_presence_authenticates_sender_unit_and_keeps_original_timestamp() {
-    let bus = PrivateBus::start();
-    let state = Arc::new(Mutex::new(FakeState::new(Outcome::Success)));
-    let _nm = fake_nm(&bus, state).await;
-    let (mut core, api) = controller(&bus).await;
-    core.reconcile_inner().await.unwrap();
-    let unit = Arc::new(Mutex::new("foreign.service".to_string()));
-    let pids = Arc::new(Mutex::new(Vec::new()));
-    let _systemd = zbus::connection::Builder::address(bus.address.as_str())
-        .unwrap()
-        .serve_at(
-            "/org/freedesktop/systemd1",
-            PresenceManager {
-                pids: pids.clone(),
-                unit: unit.clone(),
-            },
-        )
-        .unwrap()
-        .serve_at(
-            "/org/freedesktop/systemd1/unit/peripheral",
-            PresenceUnit(unit.clone()),
-        )
-        .unwrap()
-        .name("org.freedesktop.systemd1")
-        .unwrap()
-        .build()
-        .await
-        .unwrap();
-    let client = bus.connect().await;
-    let proxy = zbus::proxy::Builder::<Proxy<'_>>::new(&client)
-        .destination(SERVICE)
-        .unwrap()
-        .path(PATH)
-        .unwrap()
-        .interface(INTERFACE)
-        .unwrap()
-        .cache_properties(zbus::proxy::CacheProperties::No)
-        .build()
-        .await
-        .unwrap();
-    let token = api.reserve("").unwrap();
-    let edge = monotonic();
-    let denied = proxy
-        .call::<_, _, ()>("ReportPresence", &(edge.as_nanos() as u64,))
-        .await
-        .unwrap_err();
-    assert!(denied.to_string().contains("unauthorized-unit"), "{denied}");
-    assert!(!api.authorized(&token));
-    *unit.lock().unwrap() = "peripheral.service".into();
-    let old = edge.saturating_sub(Duration::from_secs(400));
-    proxy
-        .call::<_, _, ()>("ReportPresence", &(old.as_nanos() as u64,))
-        .await
-        .unwrap();
-    assert!(!api.authorized(&token));
-    proxy
-        .call::<_, _, ()>(
-            "ReportPresence",
-            &((monotonic() + Duration::from_secs(10)).as_nanos() as u64,),
-        )
-        .await
-        .unwrap();
-    assert!(!api.authorized(&token));
-    proxy
-        .call::<_, _, ()>("ReportPresence", &(edge.as_nanos() as u64,))
-        .await
-        .unwrap();
-    assert!(api.authorized(&token));
-    assert!(pids
-        .lock()
-        .unwrap()
-        .iter()
-        .all(|&pid| pid == std::process::id()));
-    // A consumed edge cannot be made fresh by arriving over D-Bus again.
-    api.shared
-        .lock()
-        .unwrap()
-        .reservation
-        .as_mut()
-        .unwrap()
-        .authorized_until = None;
-    proxy
-        .call::<_, _, ()>("ReportPresence", &(edge.as_nanos() as u64,))
-        .await
-        .unwrap();
-    assert!(!api.authorized(&token));
+async fn private_bus_presence_authenticates_sender_uid_and_keeps_original_timestamp() {
+    let current_user = String::from_utf8(
+        std::process::Command::new("id")
+            .arg("-un")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let mismatch = if unsafe { libc::geteuid() } == 0 {
+        "nobody"
+    } else {
+        "root"
+    };
+    assert_ne!(crate::auth::user_uid(mismatch).unwrap(), unsafe {
+        libc::geteuid()
+    });
+    // Every client in this fixture has the same OS UID. Different connections
+    // represent restarts, not different service accounts.
+    for simulate in [false, true] {
+        for user in [
+            "",
+            "device-core-no-such-account",
+            "root\0other",
+            mismatch,
+            &current_user,
+        ] {
+            let bus = PrivateBus::start();
+            let mut options = test_options();
+            options.simulate = simulate;
+            options.presence_user = user.into();
+            let (core, api) = controller_options(&bus, options.clone()).await;
+            api.shared.lock().unwrap().status.mode = "hotspot".into();
+            let client = bus.connect().await;
+            let proxy = Proxy::new(&client, SERVICE, PATH, INTERFACE).await.unwrap();
+            let token = api.reserve("").unwrap();
+            let edge = monotonic();
+            let result = proxy
+                .call::<_, _, ()>("ReportPresence", &(edge.as_nanos() as u64,))
+                .await;
+            if user != current_user {
+                assert!(
+                    matches!(result, Err(zbus::Error::MethodError(ref name, _, _))
+                    if name.as_str() == "org.freedesktop.DBus.Error.AccessDenied"),
+                    "{user:?} simulate={simulate}: {result:?}"
+                );
+                assert!(!api.authorized(&token));
+            } else {
+                result.unwrap();
+                assert!(api.authorized(&token));
+                // A consumed edge cannot be made fresh by arriving over D-Bus again.
+                api.shared
+                    .lock()
+                    .unwrap()
+                    .reservation
+                    .as_mut()
+                    .unwrap()
+                    .authorized_until = None;
+                for stale in [
+                    edge,
+                    edge.saturating_sub(Duration::from_secs(400)),
+                    monotonic() + Duration::from_secs(10),
+                ] {
+                    proxy
+                        .call::<_, _, ()>("ReportPresence", &(stale.as_nanos() as u64,))
+                        .await
+                        .unwrap();
+                    assert!(!api.authorized(&token));
+                }
+                proxy
+                    .call::<_, _, ()>("ReportPresence", &(monotonic().as_nanos() as u64,))
+                    .await
+                    .unwrap();
+                assert!(api.authorized(&token));
+            }
+            assert!(
+                crate::auth::sender_uid(&core.bus, SERVICE).await.is_err(),
+                "well-known names must never replace the exact sender"
+            );
+            let sender = client.unique_name().unwrap().to_string();
+            assert_eq!(
+                crate::auth::sender_uid(&core.bus, &sender).await.unwrap(),
+                unsafe { libc::geteuid() }
+            );
+            client.close().await.unwrap();
+            assert!(
+                crate::auth::sender_uid(&core.bus, &sender).await.is_err(),
+                "a disconnected connection has no authenticated UID"
+            );
+            core.bus.clone().close().await.unwrap();
+            std::fs::remove_file(options.network_guard).unwrap();
+        }
+    }
 }
 
 #[tokio::test]

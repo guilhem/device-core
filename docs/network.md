@@ -37,10 +37,12 @@ structure in this exact field order (uint64 for `t`, uint8 for `y`).
 Connect with empty UUID creates a candidate; otherwise it activates the native
 saved profile without rewriting it. A nonempty token requests physical setup
 authorization; its presence lease is consumed. ReportPresence authenticates the
-actual unique sender with `auth::authorize_unit`, using Options.presence_unit.
+actual unique sender with `auth::authorize_user`, comparing the bus-supplied Unix
+UID with the account named by `Options.presence_user` (`DEVICE_CORE_PRESENCE_USER`).
 It accepts only original, fresh timestamps after the reservation, and cannot be
 called through HTTP. The parent must authenticate against its supplied system
-bus (or explicit private simulation bus), never caller-provided unit/PID data.
+bus (or explicit private simulation bus), never caller-provided UID/PID data. An empty presence user disables reporting;
+an unknown account prevents daemon startup. Simulation uses the same authorization.
 
 Read Status, require ready/client, then AcquireGuard(status.generation). The FD
 already holds a shared flock: keep it open during download/install. Never unlock

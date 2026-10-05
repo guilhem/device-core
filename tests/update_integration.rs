@@ -45,7 +45,8 @@ struct PrivateBus {
 }
 impl PrivateBus {
     async fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("updates-test-{}", token().unwrap()));
+        // Keep Unix socket paths short under a workspace-local TMPDIR.
+        let dir = std::env::temp_dir().join(format!("u-{}", &token().unwrap()[..16]));
         std::fs::create_dir(&dir).unwrap();
         let socket = dir.join("bus");
         let address = format!("unix:path={}", socket.display());
@@ -502,6 +503,17 @@ impl Fixture {
         .await
         .expect("installation never reached a terminal result")
     }
+    async fn maintenance_released(&self) {
+        // A terminal install result precedes asynchronous helper cleanup and
+        // the coordinator's release callback. Observe that separate boundary.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while self.gate.blocked() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("maintenance was never released");
+    }
     async fn install(&self, retry: bool) -> Status {
         let id = self
             .updater
@@ -565,6 +577,7 @@ async fn typed_bus_api_same_actor_and_client_disconnect() {
     assert_eq!(f.updater.status().state, "installing");
     assert!(f.gate.blocked());
     let status = f.terminal(&id).await;
+    f.maintenance_released().await;
     assert_eq!(status.state, "reboot");
     assert_eq!(status.progress, 100);
     assert!(!status.pending_auto);
@@ -1215,6 +1228,7 @@ struct PrepareData {
     active: bool,
     fail_start: bool,
     fail_stop: bool,
+    stop_delay: Duration,
 }
 #[derive(Clone)]
 struct FakePrepare(Arc<Mutex<PrepareData>>);
@@ -1226,7 +1240,7 @@ impl FakePrepare {
         connection: &Connection,
     ) -> fdo::Result<zbus::zvariant::OwnedObjectPath> {
         assert_eq!(unit, "manual-prepare.service");
-        let (id, result) = {
+        let (id, result, delay) = {
             let mut d = self.0.lock().unwrap();
             d.jobs.push(start);
             if !start && d.fail_stop && d.active {
@@ -1246,7 +1260,11 @@ impl FakePrepare {
                     d.active = false;
                 }
             }
-            (d.jobs.len() as u32, if failed { "failed" } else { "done" })
+            (
+                d.jobs.len() as u32,
+                if failed { "failed" } else { "done" },
+                if start { Duration::ZERO } else { d.stop_delay },
+            )
         };
         let path = zbus::zvariant::OwnedObjectPath::try_from(format!(
             "/org/freedesktop/systemd1/job/{id}"
@@ -1256,7 +1274,7 @@ impl FakePrepare {
         let unit = unit.to_string();
         let connection = connection.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(delay.max(Duration::from_millis(10))).await;
             connection
                 .emit_signal(
                     None::<&str>,
@@ -1519,8 +1537,11 @@ async fn manual_helper_lifecycle_keeps_normal_installs_signed_and_recovers_orpha
     assert_eq!(helper.0.lock().unwrap().jobs, [false]);
     assert!(!f.options.update_prepared_bundle.exists());
     assert!(!f.options.data_dir.join("updates/manual.raucb").exists());
+    // Completion is visible before the preparation helper has finished stopping.
+    helper.0.lock().unwrap().stop_delay = Duration::from_millis(200);
     let s = f.manual("dev-test", true, false).await;
     assert_eq!(s.state, "reboot", "{s:?}");
+    f.maintenance_released().await;
     assert_eq!(helper.0.lock().unwrap().jobs, [false, false, true, false]);
     assert!(!helper.0.lock().unwrap().active);
     assert!(!f.options.update_prepared_bundle.exists());
@@ -1541,8 +1562,10 @@ async fn manual_helper_failures_keep_resources_until_rauc_and_cleanup_are_known(
     let (_manager, helper) = prepare_manager(&mut f).await;
     f.refresh().await;
     helper.0.lock().unwrap().fail_start = true;
+    helper.0.lock().unwrap().stop_delay = Duration::from_millis(200);
     let s = f.manual("dev-test", true, false).await;
     assert!(s.error.contains("job: failed"), "{s:?}");
+    f.maintenance_released().await;
     assert!(!f.gate.blocked());
     assert!(f.rauc.0.lock().unwrap().installed.is_empty());
     helper.0.lock().unwrap().fail_start = false;
@@ -1572,13 +1595,7 @@ async fn manual_rauc_outcomes_retry_busy_and_unknown_owner_retain_helper() {
         } else {
             assert!(!s.error.is_empty(), "{s:?}");
         }
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while f.gate.blocked() {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
+        f.maintenance_released().await;
         assert_eq!(helper.0.lock().unwrap().jobs, [false, false, true, false]);
         assert!(!f.gate.blocked());
         if mode == 1 || mode == 3 {
@@ -1626,7 +1643,7 @@ async fn manual_rauc_outcomes_retry_busy_and_unknown_owner_retain_helper() {
 async fn activatable_native_rauc_is_started_before_initial_recovery() {
     use futures_util::StreamExt;
     // Native service activation uses its own disposable bus and slots, never the host bus.
-    let dir = std::env::temp_dir().join(format!("rauc-activation-{}", token().unwrap()));
+    let dir = std::env::temp_dir().join(format!("r-{}", &token().unwrap()[..16]));
     std::fs::create_dir(&dir).unwrap();
     let services = dir.join("services");
     std::fs::create_dir(&services).unwrap();

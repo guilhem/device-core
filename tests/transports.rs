@@ -32,8 +32,8 @@ fn daemon(address: &str, data: &Temp, http: Option<&str>) -> Child {
         .env_remove("DEVICE_CORE_UPDATE_REPO")
         .env_remove("DEVICE_CORE_UPDATE_ASSET")
         .env_remove("DEVICE_CORE_LVA_UNIT")
-        .env_remove("DEVICE_CORE_MAINTENANCE_UNITS")
-        .env_remove("DEVICE_CORE_PRESENCE_UNIT")
+        .env_remove("DEVICE_CORE_MAINTENANCE_USERS")
+        .env_remove("DEVICE_CORE_PRESENCE_USER")
         .env_remove("DEVICE_CORE_HTTP_ADDR")
         .kill_on_drop(true);
     if let Some(http) = http {
