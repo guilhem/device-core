@@ -146,10 +146,17 @@ grant this persistent directory and retain RAUC's inactive-slot permissions.
 ## Security and recovery
 
 Repository and asset names are restricted to safe ASCII components; tags are
-strict `vSemVer`, at most 64 bytes, with core components at most 999999. Build
-metadata does not affect precedence. Drafts/invalid tags are excluded, stable
-excludes both GitHub-flagged and SemVer prereleases, and the selected tag's
-metadata is fetched again before installation. Relevant duplicate assets,
+strict `vSemVer` or `edge-A.B.C.RUN`, at most 64 bytes, with core components at
+most 999999. Edge tags contain exactly four canonical decimal components (no
+leading zero except `0`); RUN follows SemVer numeric prerelease conventions.
+Only ordering maps Edge to `A.B.C-edge.RUN`: API/download paths, installed image
+versions, journal tags and RAUC boot matching retain the exact raw tag. Build
+metadata does not affect precedence. Drafts/invalid tags are excluded. Stable
+excludes both GitHub-flagged and SemVer prereleases; Test accepts stable and
+ordinary prereleases but excludes Edge; Edge accepts only `edge-*` prereleases.
+Every online installation requires a strictly greater version, including after
+a channel switch: changing channels never authorizes a downgrade. The selected
+tag's metadata is fetched again before installation. Relevant duplicate assets,
 non-uploaded assets and URLs differing from the exact repository/tag/asset path
 are rejected. Bundles are limited to 2 GiB, SHA256SUMS to 64 KiB (metadata and
 actual body), JSON to 16 MiB per page, catalogue to ten pages of 100 releases.
@@ -211,9 +218,9 @@ resume files during manual uploads.
 
 `rauc info --no-verify --output-format=json` reads the actual manifest version;
 inspection does not authorize the installation. Versions must be nonempty,
-contain no control characters, and be at most 64 characters. Same versions,
+contain no control characters, and be at most 64 bytes. Same versions,
 downgrades and development versions are allowed locally. The journal's
-`pending.local` field defaults to false: online entries retain strict SemVer
+`pending.local` field defaults to false: online entries retain strict release-tag
 validation, while local entries accept these manifest versions and always have
 `automatic=false`. Slot, exact version and health still govern boot reconciliation.
 Manual installs never trigger automatic reboot.
@@ -243,7 +250,8 @@ cargo test --test update_integration
 cargo clippy --all-targets -- -D warnings
 ```
 
-Six unit checks and twenty-one integration checks cover the typed wire signatures,
+Unit and integration checks cover the typed wire signatures, three-channel filtering,
+channel switches without downgrades, raw Edge identity and recovery,
 catalogue/security limits, resumed downloads, journal/health/rollback, spoofed and
 stale Completed, lost replies/results, client disconnects, unknown-owner recovery,
 maintenance rollback, automatic policy and actor-serialized power requests.

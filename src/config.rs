@@ -80,7 +80,7 @@ impl Settings {
             return Err(invalid("volume must be 0-100"));
         }
         let u = &self.updates;
-        if !matches!(u.channel.as_str(), "stable" | "test") {
+        if !matches!(u.channel.as_str(), "stable" | "test" | "edge") {
             return Err(invalid("unknown update channel"));
         }
         if u.start.hour >= 24
