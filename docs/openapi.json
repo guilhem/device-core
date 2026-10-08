@@ -1270,7 +1270,8 @@
             "type": "string",
             "enum": [
               "stable",
-              "test"
+              "test",
+              "edge"
             ]
           },
           "start": {

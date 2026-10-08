@@ -44,6 +44,27 @@ impl Drop for Temp {
 }
 
 #[test]
+fn config_update_channels_persist_and_reject_unknown_values() {
+    let temp = Temp::new();
+    let path = temp.0.join("settings.json");
+    for channel in ["stable", "test", "edge", "stable"] {
+        let store = Store::new(&path, Events::default()).unwrap();
+        let (revision, mut settings) = store.read().unwrap();
+        settings.updates.channel = channel.into();
+        store.update(&revision, settings).unwrap();
+        let reopened = Store::new(&path, Events::default()).unwrap();
+        assert_eq!(reopened.read().unwrap().1.updates.channel, channel);
+        let before = fs::read(&path).unwrap();
+        for invalid in ["", "Edge", "nightly", "edge ", "edge-1.2.3.4"] {
+            let (revision, mut settings) = reopened.read().unwrap();
+            settings.updates.channel = invalid.into();
+            assert!(reopened.update(&revision, settings).is_err());
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+    }
+}
+
+#[test]
 fn config_schema_cas_restart_and_crash_recovery() {
     let temp = Temp::new();
     let path = temp.0.join("settings.json");
@@ -391,7 +412,9 @@ impl Drop for Bus {
 async fn system_clock_awaits_jobs_restores_ntp_and_survives_cancellation() {
     let bus = Bus::new().await;
     let temp = Temp::new();
-    let (system, _) = bus.system(&temp, false);
+    let (_, options) = bus.system(&temp, false);
+    let events = Events::default();
+    let system = System::new(bus.client.clone(), options, events.clone());
     for (active, fail) in [(true, false), (true, true), (false, false)] {
         bus.state.ntp.store(active, Ordering::SeqCst);
         bus.state.fail_time.store(fail, Ordering::SeqCst);
@@ -414,13 +437,29 @@ async fn system_clock_awaits_jobs_restores_ntp_and_survives_cancellation() {
     assert!(system.set_time(-1).await.is_err());
     bus.state.ntp.store(true, Ordering::SeqCst);
     bus.state.delay_job.store(true, Ordering::SeqCst);
+    let mut completed = events.0.subscribe();
     let worker = {
         let system = system.clone();
         tokio::spawn(async move { system.set_time(1_790_000_001_000_000).await })
     };
-    sleep(Duration::from_millis(20)).await;
+    // Cancel accepted work, rather than guessing when the stop job starts.
+    timeout(Duration::from_secs(3), async {
+        while bus.state.jobs.lock().unwrap().is_empty() {
+            sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("clock request did not start its stop job");
     worker.abort();
-    sleep(Duration::from_millis(250)).await;
+    assert!(worker.await.unwrap_err().is_cancelled());
+    // SetTime is emitted after NTP restoration and the clock marker write.
+    let event = timeout(Duration::from_secs(3), completed.recv())
+        .await
+        .expect("clock request did not finish after cancellation")
+        .unwrap();
+    assert_eq!(event.domain, "system");
+    assert_eq!(event.data["operation"], "SetTime");
+    assert_eq!(event.data["unix_microseconds"], 1_790_000_001_000_000_i64);
     assert!(
         bus.state.ntp.load(Ordering::SeqCst),
         "request cancellation lost NTP restoration"
