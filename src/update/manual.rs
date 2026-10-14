@@ -17,9 +17,7 @@ use tokio::io::AsyncReadExt;
 const MAX_BUNDLE: u64 = 2 << 30;
 
 pub(super) fn valid_version(version: &str) -> bool {
-    !version.trim().is_empty()
-        && version.chars().count() <= 64
-        && !version.chars().any(char::is_control)
+    !version.trim().is_empty() && version.len() <= 64 && !version.chars().any(char::is_control)
 }
 
 pub(super) fn validate_file(file: &File) -> Result<u64, String> {
@@ -322,10 +320,17 @@ mod tests {
         assert!(validate_file(&file).is_err());
         file.set_len(MAX_BUNDLE + 1).unwrap();
         assert!(validate_file(&file).is_err());
-        for version in ["dev-test", "v1.0.0", "1.0", &"x".repeat(64)] {
+        for version in [
+            "dev-test",
+            "v1.0.0",
+            "edge-1.2.3.4",
+            "1.0",
+            &"x".repeat(64),
+            &"é".repeat(32),
+        ] {
             assert!(valid_version(version));
         }
-        for version in ["", " ", "dev\n", "dev\0", &"x".repeat(65)] {
+        for version in ["", " ", "dev\n", "dev\0", &"x".repeat(65), &"é".repeat(33)] {
             assert!(!valid_version(version));
         }
         fs::remove_dir_all(dir).unwrap();

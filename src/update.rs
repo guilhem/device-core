@@ -581,7 +581,7 @@ impl Core {
                 self.options.image_version
             ));
         }
-        if channel != "stable" && channel != "test" {
+        if !matches!(channel, "stable" | "test" | "edge") {
             return Err("unknown update channel".into());
         }
         if automatic && retry {
@@ -926,7 +926,7 @@ impl Core {
     }
 }
 
-/// Strict vSemVer precedence; build metadata does not make a release newer.
+/// Strict release precedence; build metadata does not make a release newer.
 pub fn newer(tag: &str, current: &str) -> bool {
     let Some(tag) = catalog::version(tag) else {
         return false;

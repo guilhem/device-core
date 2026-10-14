@@ -88,7 +88,7 @@ impl Journal {
                         && !other_slot(&p.from_slot).is_empty()
                         && p.to_slot == other_slot(&p.from_slot)
                         && matches!(p.phase.as_str(), "installing" | "installed")
-                        && matches!(p.channel.as_str(), "stable" | "test")
+                        && matches!(p.channel.as_str(), "stable" | "test" | "edge")
                 })
                 .unwrap_or(true);
             if valid {
@@ -218,6 +218,45 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn edge_pending_roundtrip_and_invalid_identity_suspension() {
+        let dir =
+            std::env::temp_dir().join(format!("edge-journal-{}", crate::common::token().unwrap()));
+        let path = dir.join("state.json");
+        let mut j = Journal {
+            pending: Some(Pending {
+                tag: "edge-1.2.3.10".into(),
+                sha256: "a".repeat(64),
+                from: "edge-1.2.3.2".into(),
+                from_slot: "A".into(),
+                to_slot: "B".into(),
+                channel: "edge".into(),
+                boot_id: "boot-1".into(),
+                phase: "installed".into(),
+                automatic: true,
+                local: false,
+                operation_id: "edge-operation".into(),
+            }),
+            target: "edge-1.2.3.10".into(),
+            ..Journal::default()
+        };
+        for channel in ["stable", "test", "edge"] {
+            j.pending.as_mut().unwrap().channel = channel.into();
+            write_atomic(&path, &j).unwrap();
+            assert_eq!(Journal::load(&dir).unwrap(), j);
+        }
+        for (tag, channel) in [("edge-1.2.3.01", "edge"), ("edge-1.2.3.10", "nightly")] {
+            let p = j.pending.as_mut().unwrap();
+            p.tag = tag.into();
+            p.channel = channel.into();
+            write_atomic(&path, &j).unwrap();
+            let loaded = Journal::load(&dir).unwrap();
+            assert!(loaded.pending.is_none());
+            assert!(!loaded.suspended.is_empty());
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn failed_write_adopts_visible_markers_without_claiming_durability() {
         let dir =

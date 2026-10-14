@@ -22,7 +22,24 @@ pub(super) fn version(tag: &str) -> Option<semver::Version> {
     if tag.len() > 64 {
         return None;
     }
-    let v = semver::Version::parse(tag.strip_prefix('v')?).ok()?;
+    let v = if let Some(edge) = tag.strip_prefix("edge-") {
+        let parts: [&str; 4] = edge.split('.').collect::<Vec<_>>().try_into().ok()?;
+        if parts.iter().any(|p| {
+            p.is_empty()
+                || !p.bytes().all(|c| c.is_ascii_digit())
+                || p.len() > 1 && p.starts_with('0')
+        }) {
+            return None;
+        }
+        // Normalize only for precedence; release identities retain their raw tag.
+        semver::Version::parse(&format!(
+            "{}.{}.{}-edge.{}",
+            parts[0], parts[1], parts[2], parts[3]
+        ))
+        .ok()?
+    } else {
+        semver::Version::parse(tag.strip_prefix('v')?).ok()?
+    };
     if v.major > 999999 || v.minor > 999999 || v.patch > 999999 {
         return None;
     }
@@ -51,7 +68,13 @@ pub(super) fn valid_hash(sum: &str) -> bool {
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 pub(super) fn allowed(r: &Release, channel: &str) -> bool {
-    channel == "test" || channel == "stable" && !r.prerelease
+    let edge = r.tag.starts_with("edge-");
+    match channel {
+        "stable" => !edge && !r.prerelease,
+        "test" => !edge,
+        "edge" => edge && r.prerelease,
+        _ => false,
+    }
 }
 fn loopback(url: &Url) -> bool {
     url.host_str()
@@ -504,6 +527,68 @@ async fn verify(path: PathBuf, size: u64, sum: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn edge_identity_and_numeric_precedence() {
+        for (raw, ordered) in [
+            ("edge-0.0.0.0", "0.0.0-edge.0"),
+            (
+                "edge-999999.999999.999999.99999999999999999999",
+                "999999.999999.999999-edge.99999999999999999999",
+            ),
+        ] {
+            assert_eq!(version(raw).unwrap().to_string(), ordered);
+        }
+        let longest = format!("edge-1.2.3.{}", "9".repeat(53));
+        assert_eq!(longest.len(), 64);
+        assert!(version(&longest).is_some());
+        assert!(version(&format!("{longest}9")).is_none());
+        for raw in [
+            "edge-1.2.3",
+            "edge-1.2.3.4.5",
+            "edge-01.2.3.4",
+            "edge-1.02.3.4",
+            "edge-1.2.03.4",
+            "edge-1.2.3.04",
+            "edge-1.2.3.",
+            "edge-.2.3.4",
+            "edge-1.2.3.-4",
+            "edge-1.2.3.+4",
+            "edge-1.2.3.4+build",
+            "edge-1.2.3-rc.4",
+            "edge-1.2.3.4\n",
+            "edge-1.2.3.４",
+            "edge-1000000.2.3.4",
+            "edge-1.1000000.3.4",
+            "edge-1.2.1000000.4",
+            "Edge-1.2.3.4",
+            "vedge-1.2.3.4",
+        ] {
+            assert!(version(raw).is_none(), "{raw:?}");
+        }
+        for (a, b) in [
+            ("edge-1.2.3.10", "edge-1.2.3.2"),
+            ("edge-1.10.0.1", "edge-1.9.9.999"),
+            (
+                "edge-1.2.3.99999999999999999999",
+                "edge-1.2.3.9999999999999999999",
+            ),
+            ("v1.2.3", "edge-1.2.3.10"),
+            ("v1.2.3-rc.1", "edge-1.2.3.10"),
+            ("edge-1.2.4.0", "v1.2.3"),
+        ] {
+            assert!(super::super::newer(a, b), "{a} > {b}");
+            assert!(!super::super::newer(b, a), "{b} <= {a}");
+        }
+        for (a, b) in [
+            ("edge-1.2.3.10", "edge-1.2.3.10"),
+            ("edge-1.2.3.10", "v1.2.3-edge.10"),
+            ("v1.2.3-edge.10+build", "edge-1.2.3.10"),
+        ] {
+            assert!(!super::super::newer(a, b));
+            assert!(!super::super::newer(b, a));
+        }
+    }
+
     #[test]
     fn strict_identity_checksum_and_redirects() {
         for tag in [

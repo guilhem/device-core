@@ -19,6 +19,8 @@ Register the handle on the parent's supplied connection at
 Settings fields: locale, timezone, volume, auto_check_updates, Updates,
 voice_enabled. Updates fields: automatic, channel, start HM, end HM.
 HM fields: hour, min. Public Rust/JSON names match these fields exactly.
+Channels are `stable` (stable releases), `test` (stable and ordinary prereleases,
+excluding Edge), and `edge` (only `edge-*` prereleases).
 
 The new version 1 file is `data_dir/settings.json`; application data and older
 NabOS configuration schemas are rejected. Revisions include random incarnation,

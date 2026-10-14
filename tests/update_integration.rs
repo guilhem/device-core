@@ -728,6 +728,204 @@ async fn catalogue_pagination_precedence_and_previous_catalogue_on_failure() {
 }
 
 #[tokio::test]
+async fn three_channels_filter_and_sort_raw_edge_tags() {
+    let f = Fixture::new().await;
+    {
+        let mut d = f.http.lock().unwrap();
+        for tag in [
+            "edge-1.3.0.2",
+            "edge-1.3.0.10",
+            "v1.3.0-rc.1",
+            "v1.3.0",
+            "v1.4.0",
+        ] {
+            d.add(tag);
+        }
+        d.releases.last_mut().unwrap()["prerelease"] = json!(true);
+        d.add("edge-1.3.0.11");
+        d.releases.last_mut().unwrap()["draft"] = json!(true);
+        d.add("edge-1.3.0.01");
+    }
+    let all = f.updater.check().await.unwrap();
+    assert_eq!(all.len(), 6);
+    for (channel, expected) in [
+        ("stable", vec!["v1.3.0", "v1.2.0"]),
+        ("test", vec!["v1.4.0", "v1.3.0", "v1.3.0-rc.1", "v1.2.0"]),
+        ("edge", vec!["edge-1.3.0.10", "edge-1.3.0.2"]),
+        ("unknown", vec![]),
+    ] {
+        let releases = f.updater.releases(channel);
+        assert_eq!(
+            releases.iter().map(|r| r.tag.as_str()).collect::<Vec<_>>(),
+            expected
+        );
+        if channel == "edge" {
+            for r in releases {
+                assert!(r.prerelease); // Even if GitHub forgot its prerelease flag.
+                assert!(r.ready);
+                assert!(r.bundle_url.contains(&format!("/download/{}/", r.tag)));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn channel_switches_require_strictly_newer_releases_and_selected_channel() {
+    for (current, channel, target, expected) in [
+        ("v1.2.0", "edge", "edge-1.2.0.10", "not newer"),
+        ("v1.2.0", "edge", "edge-1.3.0.1", "reboot"),
+        ("v1.2.0-rc.1", "edge", "edge-1.2.0.10", "not newer"),
+        ("v1.2.0-rc.1", "edge", "edge-1.3.0.1", "reboot"),
+        ("edge-1.2.0.10", "stable", "v1.2.0", "reboot"),
+        ("edge-1.2.0.10", "test", "v1.2.0-rc.1", "reboot"),
+        ("edge-1.3.0.1", "stable", "v1.2.0", "not newer"),
+        ("edge-1.3.0.1", "test", "v1.2.0-rc.1", "not newer"),
+        ("v1.2.0-rc.1", "stable", "v1.2.0", "reboot"),
+        ("v1.2.0", "test", "v1.2.0-rc.1", "not newer"),
+        ("edge-1.2.0.2", "edge", "edge-1.2.0.10", "reboot"),
+        ("edge-1.2.0.10", "edge", "edge-1.2.0.10", "not newer"),
+        ("v1.2.0-edge.10", "edge", "edge-1.2.0.10", "not newer"),
+        (
+            "v1.1.0",
+            "stable",
+            "edge-1.2.0.1",
+            "outside selected channel",
+        ),
+        ("v1.1.0", "test", "edge-1.2.0.1", "outside selected channel"),
+        ("v1.1.0", "edge", "v1.2.0", "outside selected channel"),
+        ("v1.1.0", "edge", "v1.2.0-rc.1", "outside selected channel"),
+    ] {
+        let mut f = Fixture::new().await;
+        f.options.image_version = current.into();
+        f.settings.send_modify(|s| s.channel = channel.into());
+        f.refresh().await;
+        {
+            let mut d = f.http.lock().unwrap();
+            d.releases.clear();
+            d.add(target);
+        }
+        f.updater.check().await.unwrap();
+        let result = f.updater.install(target, channel, false, false).await;
+        if expected == "not newer" {
+            assert!(
+                result.unwrap_err().contains(expected),
+                "{current}/{channel}/{target}"
+            );
+            assert!(!f.updater.releases(channel).iter().any(|r| r.tag == target));
+        } else {
+            let status = f.terminal(&result.unwrap()).await;
+            if expected == "reboot" {
+                assert_eq!(
+                    status.state, expected,
+                    "{current}/{channel}/{target}: {status:?}"
+                );
+            } else {
+                assert!(
+                    status.error.contains(expected),
+                    "{current}/{channel}/{target}: {status:?}"
+                );
+            }
+            f.maintenance_released().await;
+        }
+        assert_eq!(
+            f.rauc.0.lock().unwrap().installed.len(),
+            usize::from(expected == "reboot")
+        );
+    }
+    let f = Fixture::new().await;
+    for (tag, channel, expected) in [
+        ("edge-1.2.0.01", "edge", "invalid release tag"),
+        ("edge-1.2.0.1", "nightly", "unknown update channel"),
+    ] {
+        assert!(f
+            .updater
+            .install(tag, channel, false, false)
+            .await
+            .unwrap_err()
+            .contains(expected));
+    }
+}
+
+#[tokio::test]
+async fn edge_install_download_resume_and_journal_recovery_keep_raw_identity() {
+    let raw = "edge-1.2.0.10";
+    for installed_version in [raw, "v1.2.0-edge.10"] {
+        let mut f = Fixture::new().await;
+        f.options.image_version = "edge-1.2.0.2".into();
+        f.settings.send_modify(|s| s.channel = "edge".into());
+        f.refresh().await;
+        {
+            let mut d = f.http.lock().unwrap();
+            d.add(raw);
+            d.cut_once = true;
+        }
+        let proxy = Proxy::new(
+            &f.connection,
+            f.connection.unique_name().unwrap().as_str(),
+            PATH,
+            UPDATES,
+        )
+        .await
+        .unwrap();
+        let id: String = proxy
+            .call("Install", &(raw, "edge", false, false))
+            .await
+            .unwrap();
+        assert_eq!(f.terminal(&id).await.state, "error");
+        f.maintenance_released().await;
+        let id: String = proxy
+            .call("Install", &(raw, "edge", false, false))
+            .await
+            .unwrap();
+        let status = f.terminal(&id).await;
+        assert_eq!(status.state, "reboot", "{status:?}");
+        assert_eq!(status.current, "edge-1.2.0.2");
+        assert_eq!(status.target, raw);
+        assert_eq!(status.pending_channel, "edge");
+        f.maintenance_released().await;
+        assert!(f
+            .http
+            .lock()
+            .unwrap()
+            .ranges
+            .iter()
+            .any(|r| r.starts_with("bytes=")));
+        assert_eq!(
+            f.rauc.0.lock().unwrap().installed[0],
+            f.http.lock().unwrap().bundles[raw]
+        );
+        let path = f.options.data_dir.join("updates/state.json");
+        let mut journal: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(journal["pending"]["tag"], raw);
+        assert_eq!(journal["pending"]["from"], "edge-1.2.0.2");
+        assert_eq!(journal["pending"]["channel"], "edge");
+        assert_eq!(journal["target"], raw);
+        let same_boot = f.fresh(&f.options).await;
+        assert_eq!(same_boot.status().state, "reboot");
+        assert!(!same_boot.status().suspended);
+        journal["pending"]["boot_id"] = json!("previous-boot");
+        std::fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        f.rauc.0.lock().unwrap().slot = "B".into();
+        std::fs::write(&f.options.boot_health, "good B\n").unwrap();
+        let mut options = f.options.clone();
+        options.image_version = installed_version.into();
+        let recovered = f.fresh(&options).await;
+        let status = recovered.status();
+        assert_eq!(status.current, installed_version);
+        assert_eq!(status.state, "idle");
+        assert_eq!(status.suspended, installed_version != raw);
+        if installed_version == raw {
+            assert_eq!(
+                status.last_result,
+                format!("updated from edge-1.2.0.2 to {raw}")
+            );
+        } else {
+            assert!(status.last_result.contains("interrupted"));
+        }
+    }
+}
+
+#[tokio::test]
 async fn untrusted_release_metadata_body_and_redirect_are_rejected() {
     for case in [
         "foreign-url",
@@ -937,6 +1135,50 @@ async fn journal_health_version_and_rollback_reconciliation() {
 }
 
 #[tokio::test]
+async fn automatic_scheduler_selects_only_the_configured_channel() {
+    use chrono::Timelike;
+    for (channel, target) in [
+        ("stable", "v1.3.0"),
+        ("test", "v1.4.0-rc.1"),
+        ("edge", "edge-1.5.0.10"),
+    ] {
+        let f = Fixture::new().await;
+        {
+            let mut d = f.http.lock().unwrap();
+            for tag in ["v1.3.0", "v1.4.0-rc.1", "edge-1.5.0.2", "edge-1.5.0.10"] {
+                d.add(tag);
+            }
+        }
+        f.updater.check().await.unwrap();
+        let hour = chrono::Utc::now().hour();
+        f.settings.send_replace(Settings {
+            automatic: true,
+            channel: channel.into(),
+            time_reliable: true,
+            start_hour: hour,
+            end_hour: (hour + 2) % 24,
+            ..Settings::default()
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while f.updater.status().state != "reboot" {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("automatic channel install did not complete");
+        let status = f.updater.status();
+        assert_eq!(status.target, target);
+        assert_eq!(status.pending_channel, channel);
+        assert!(status.pending_auto);
+        assert_eq!(
+            f.rauc.0.lock().unwrap().installed[0],
+            f.http.lock().unwrap().bundles[target]
+        );
+        f.maintenance_released().await;
+    }
+}
+
+#[tokio::test]
 async fn automatic_scheduler_gates_claims_and_reboots_with_current_policy() {
     use chrono::Timelike;
     let f = Fixture::new().await;
@@ -1049,6 +1291,7 @@ async fn power_serializes_with_installation_and_refuses_unknown_rauc_and_journal
     assert!(f.updater.power(action.clone()).await.is_err());
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(f.terminal(&id).await.state, "reboot");
+    f.maintenance_released().await;
     f.updater.power(action.clone()).await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     f.rauc_connection.clone().close().await.unwrap();
@@ -1070,6 +1313,7 @@ async fn power_serializes_with_installation_and_refuses_unknown_rauc_and_journal
     assert_eq!(f.install(true).await.state, "reboot");
     // The successful retry is known installed, even before health clears the prior suspension.
     assert!(f.updater.status().suspended);
+    f.maintenance_released().await;
     f.updater.power(action).await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
@@ -1116,6 +1360,8 @@ async fn optional_domain_allows_power_and_releases_failed_hooks() {
     let mut options = f.options.clone();
     options.update_repo.clear();
     options.update_asset.clear();
+    // Wait for the broker to release the name before asserting RAUC is absent.
+    assert!(f.rauc_connection.release_name(RAUC).await.unwrap());
     f.rauc_connection.clone().close().await.unwrap();
     let unsupported = f.fresh(&options).await;
     assert_eq!(unsupported.status().state, "unsupported");
@@ -1210,11 +1456,23 @@ impl Fixture {
     async fn manual(&self, version: &str, bypass: bool, retry: bool) -> Status {
         use std::os::fd::AsFd;
         let file = manual_bundle(&self.bus.dir, version);
-        let id = self
-            .updater
-            .install_bundle(file.as_fd().into(), bypass, retry)
-            .await
-            .unwrap();
+        // Terminal results can precede the previous actor releasing its lock.
+        let id = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match self
+                    .updater
+                    .install_bundle(file.as_fd().into(), bypass, retry)
+                    .await
+                {
+                    Err(error) if error == "an update operation is already in progress" => {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    result => break result.unwrap(),
+                }
+            }
+        })
+        .await
+        .expect("previous update operation did not finish");
         drop(file);
         self.terminal(&id).await
     }
@@ -1421,6 +1679,7 @@ async fn manual_wire_fd_survives_disconnect_is_offline_and_uses_real_dev_manifes
     assert_eq!(f.reboots.load(Ordering::SeqCst), 0);
     assert_eq!(f.rauc.0.lock().unwrap().installed[0], expected);
     assert_eq!(std::fs::read(peer).unwrap(), b"online resume bytes");
+    f.maintenance_released().await;
     assert!(!f.options.data_dir.join("updates/manual.raucb").exists());
     let journal: Value = serde_json::from_slice(
         &std::fs::read(f.options.data_dir.join("updates/state.json")).unwrap(),
@@ -1572,6 +1831,15 @@ async fn manual_helper_failures_keep_resources_until_rauc_and_cleanup_are_known(
     helper.0.lock().unwrap().fail_stop = true;
     let s = f.manual("dev-test", true, false).await;
     assert_eq!(s.state, "reboot");
+    // The terminal result is published before asynchronous helper cleanup.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while f.updater.status().error.is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("helper cleanup failure was never reported");
+    let s = f.updater.status();
     assert!(s.error.contains("helper cleanup failed"), "{s:?}");
     assert!(f.gate.blocked());
     assert!(f.options.data_dir.join("updates/manual.raucb").exists());
