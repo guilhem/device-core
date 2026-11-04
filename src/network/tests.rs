@@ -958,6 +958,71 @@ async fn protected_hotspot_requires_a_provisioned_rsn_profile() {
 }
 
 #[tokio::test]
+async fn open_profile_bootstraps_empty_store_and_reuses_the_saved_ap_after_restart() {
+    let bus = PrivateBus::start();
+    let mut fake = FakeState::new(Outcome::Success);
+    fake.profiles.clear();
+    fake.restart();
+    let state = Arc::new(Mutex::new(fake));
+    let nm = fake_nm(&bus, state.clone()).await;
+    let mut options = test_options();
+    options.hotspot_auth = HotspotAuth::OpenProfile;
+    let (mut core, api) = controller_options(&bus, options).await;
+    let client = bus.connect().await;
+    let proxy = Proxy::new(&client, SERVICE, PATH, INTERFACE).await.unwrap();
+
+    core.reconcile_inner().await.unwrap();
+    assert!(state.lock().unwrap().profiles.is_empty());
+    core.grace = Some(Instant::now());
+    core.reconcile_inner().await.unwrap();
+    assert!(proxy.call::<_, _, String>("Reserve", &("",)).await.is_err());
+    core.reconcile_inner().await.unwrap();
+    assert_eq!(api.status().mode, "hotspot");
+    assert_eq!(api.status().address, HOTSPOT_ADDRESS);
+    let token: String = proxy.call("Reserve", &("",)).await.unwrap();
+    assert!(proxy
+        .call::<_, _, bool>("Authorized", &(&token,))
+        .await
+        .unwrap());
+
+    let recovery = {
+        let s = state.lock().unwrap();
+        assert_eq!(s.profiles.len(), 1);
+        let (path, profile) = s.profiles.first_key_value().unwrap();
+        assert_eq!(s.activation_paths, [path.as_str()]);
+        assert!(!profile.unsaved);
+        let settings = &profile.settings;
+        assert_eq!(nm::text(settings, "connection", "uuid"), HOTSPOT_UUID);
+        assert_eq!(nm::text(settings, "802-11-wireless", "mode"), "ap");
+        assert_eq!(nm::text(settings, "ipv4", "method"), "shared");
+        assert!(!bool::try_from(&settings["connection"]["autoconnect"]).unwrap());
+        assert!(!settings["connection"].contains_key("permissions"));
+        assert!(!settings.contains_key("802-11-wireless-security"));
+        path.clone()
+    };
+
+    nm.release_name(NM).await.unwrap();
+    state.lock().unwrap().restart();
+    let _new_nm = fake_nm(&bus, state.clone()).await;
+    core.reconcile_inner().await.unwrap();
+    assert!(!proxy
+        .call::<_, _, bool>("Authorized", &(&token,))
+        .await
+        .unwrap());
+    core.grace = Some(Instant::now());
+    core.reconcile_inner().await.unwrap();
+    core.reconcile_inner().await.unwrap();
+    assert_eq!(api.status().mode, "hotspot");
+    {
+        let s = state.lock().unwrap();
+        assert_eq!(s.profiles.len(), 1);
+        assert_eq!(s.profiles[&recovery].version, 1);
+        assert_eq!(s.activation_paths, [recovery.as_str(), recovery.as_str()]);
+    }
+    std::fs::remove_file(core.options.network_guard).unwrap();
+}
+
+#[tokio::test]
 async fn open_profile_activates_automatically_and_rechecks_the_ap_for_a_lease() {
     let bus = PrivateBus::start();
     let mut fake = FakeState::new(Outcome::Success);
@@ -972,15 +1037,15 @@ async fn open_profile_activates_automatically_and_rechecks_the_ap_for_a_lease() 
     core.reconcile_inner().await.unwrap();
     core.grace = Some(Instant::now());
     assert_eq!(core.reconcile_inner().await, Err("invalid-hotspot-profile"));
-    let mut recovery = state.lock().unwrap().profiles.remove(RECOVERY).unwrap();
-    assert_eq!(core.reconcile_inner().await, Err("missing-hotspot-profile"));
-    let protected = std::mem::replace(&mut recovery.settings, open);
-    recovery.unsaved = true;
-    state
-        .lock()
-        .unwrap()
-        .profiles
-        .insert(RECOVERY.into(), recovery);
+    let protected = {
+        let mut s = state.lock().unwrap();
+        assert!(s.activation_paths.is_empty());
+        let recovery = s.profiles.get_mut(RECOVERY).unwrap();
+        assert_eq!(recovery.version, 1);
+        assert!(recovery.settings.contains_key("802-11-wireless-security"));
+        recovery.unsaved = true;
+        std::mem::replace(&mut recovery.settings, open)
+    };
     assert_eq!(core.reconcile_inner().await, Err("invalid-hotspot-profile"));
     {
         let mut s = state.lock().unwrap();

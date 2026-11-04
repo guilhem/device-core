@@ -547,7 +547,7 @@ impl Nm {
                 return self.activate(&path).await;
             }
         }
-        if self.options.hotspot_auth.requires_saved_profile() {
+        if self.options.hotspot_auth == HotspotAuth::ProtectedProfile {
             return Err("missing-hotspot-profile");
         }
         let machine = std::fs::read_to_string("/etc/machine-id").unwrap_or_default();
@@ -600,7 +600,16 @@ impl Nm {
             "ipv6".into(),
             HashMap::from([("method".into(), string("disabled"))]),
         );
+        // NetworkManager rejects duplicate UUIDs; retry by reading the store again.
         let path = self.add(&settings, true).await?;
+        if self.options.hotspot_auth == HotspotAuth::OpenProfile {
+            let saved: Settings = self
+                .call(path.as_str(), CONNECTION, "GetSettings", &())
+                .await?;
+            if !self.provisioned_hotspot(&path, &saved).await? {
+                return Err("invalid-hotspot-profile");
+            }
+        }
         self.activate(&path).await
     }
 }

@@ -50,21 +50,21 @@ an unknown account prevents daemon startup. Simulation uses the same authorizati
 With the default `DEVICE_CORE_HOTSPOT_AUTH=presence`, the controller can create
 a fallback AP and a portal reservation requires physical confirmation.
 
-For a trusted setup portal without physical confirmation, provision a saved
-system-owned NetworkManager Wi-Fi AP profile. Use UUID
+For a setup portal without physical confirmation, choose one of the profile
+modes below. Both use a saved, system-owned NetworkManager Wi-Fi AP with UUID
 `64657669-6365-4000-8000-000000000001` (or set `DEVICE_CORE_HOTSPOT_UUID`),
-shared IPv4 at `10.41.0.1/24` (or match `DEVICE_CORE_HOTSPOT_ADDRESS`), and
-choose one of these explicit modes:
+and shared IPv4 at `10.41.0.1/24` (or match `DEVICE_CORE_HOTSPOT_ADDRESS`).
 
-| `DEVICE_CORE_HOTSPOT_AUTH` | Required profile | Who can use the local portal |
+| `DEVICE_CORE_HOTSPOT_AUTH` | Recovery profile | Who can use the local portal |
 | --- | --- | --- |
-| `protected-profile` | WPA2: `wifi-security.key-mgmt=wpa-psk`, `wifi-security.proto=rsn`, system-owned PSK | Clients that can join with the hotspot PSK |
-| `open-profile` | Open AP with no Wi-Fi security section | Any nearby client that joins the hotspot |
+| `protected-profile` | Pre-provisioned WPA2: `wifi-security.key-mgmt=wpa-psk`, `wifi-security.proto=rsn`, system-owned PSK | Clients that can join with the hotspot PSK |
+| `open-profile` | Open AP with no Wi-Fi security section; created and saved when the UUID is absent | Any nearby client that joins the hotspot |
 
-Neither explicit mode creates a fallback profile. Both check the saved and
-applied profiles before admitting setup. Set `DEVICE_CORE_WIFI_INTERFACE` to
-select a specific NetworkManager Wi-Fi interface. If set, that interface must
-exist; newly saved client profiles are bound to it.
+An invalid profile at the configured UUID is rejected and left unchanged.
+Both modes check the saved and applied profiles before admitting setup.
+Set `DEVICE_CORE_WIFI_INTERFACE` to select a specific NetworkManager Wi-Fi
+interface. If set, that interface must exist; newly saved client profiles
+are bound to it.
 
 Keep the optional device-core HTTP listener disabled. Grant only the required
 Network D-Bus methods and property reads to the portal's dedicated system user.
