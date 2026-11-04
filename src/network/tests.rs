@@ -976,7 +976,10 @@ async fn final_ap_read_rejects_handoff_from_a_live_owner() {
     let replacement = Nm::discover(&conn, &test_options()).await.unwrap();
     assert_eq!(replacement.active_connection().await.unwrap(), path(ACT));
 
-    assert_eq!(nm.verified_active_connection().await, Err("nm-owner-changed"));
+    assert_eq!(
+        nm.verified_active_connection().await,
+        Err("nm-owner-changed")
+    );
     for state in [old_state, new_state] {
         let s = state.lock().unwrap();
         assert_eq!(s.checkpoint_generation, 0);
