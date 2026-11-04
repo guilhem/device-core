@@ -28,6 +28,11 @@ let
     };
   };
 
+  rejectsDataDir = dataDir: !(builtins.tryEval (evaluate {
+    imports = [ enable ];
+    services.device-core.dataDir = dataDir;
+  }).systemd.services.device-core.environment.DEVICE_CORE_DATA_DIR).success;
+
   service = enabled.systemd.services.device-core;
   local = extended.systemd.services.device-core;
   guard = "/run/lock/device-core/network";
@@ -76,4 +81,6 @@ assert removeAttrs local.environment [ "PATH" ] == {
 };
 assert local.serviceConfig.ReadWritePaths == [ "/data/device-core" guard ];
 assert coreRules extended == expectedRules "/data/device-core";
+assert rejectsDataDir "/data/mirror's-state";
+assert rejectsDataDir "/";
 true

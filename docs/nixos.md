@@ -22,8 +22,12 @@ in
 
 The module starts `device-core.service` under a locked `device-core` system
 account and restarts it on failure. State lives in `/var/lib/device-core` by
-default. Set `services.device-core.dataDir` to a writable absolute path without
-whitespace or systemd specifiers if your image has a separate data partition.
+default. To use a separate data partition, set `services.device-core.dataDir`
+to a writable directory such as `"/data/device-core"`. Use a normalized absolute
+path outside the Nix store. Each component may contain only ASCII letters,
+digits, dots, underscores, and hyphens. The root path `/`, components `.` and
+`..`, repeated slashes, and a trailing slash are rejected.
+
 The module also prepares `/run/lock/device-core/network`; keep that path fixed so
 network guard users share the same lock across service restarts.
 

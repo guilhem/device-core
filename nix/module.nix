@@ -12,7 +12,14 @@ in
       description = "Package providing bin/device-core.";
     };
     dataDir = lib.mkOption {
-      type = lib.types.externalPath;
+      type = (lib.types.addCheck lib.types.externalPath (path:
+        builtins.match "(/[A-Za-z0-9._-]+)+" path != null
+        && path != builtins.storeDir
+        && !lib.hasPrefix "${builtins.storeDir}/" path
+        && builtins.all (part: part != "." && part != "..") (lib.splitString "/" path)
+      )) // {
+        description = "normalized non-root absolute path outside the Nix store with only ASCII letters, digits, dots, underscores, and hyphens in each component";
+      };
       default = "/var/lib/device-core";
       description = "Writable absolute path for persistent device-core state.";
     };
