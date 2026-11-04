@@ -1,4 +1,5 @@
 use super::*;
+use crate::options::HotspotAuth;
 const HOTSPOT_UUID: &str = "64657669-6365-4000-8000-000000000001";
 const HOTSPOT_ADDRESS: &str = "10.41.0.1";
 fn test_options() -> Options {
@@ -906,7 +907,7 @@ async fn protected_hotspot_requires_a_provisioned_rsn_profile() {
     let _nm = fake_nm(&bus, state.clone()).await;
     let conn = bus.connect().await;
     let mut options = test_options();
-    options.protected_hotspot = true;
+    options.hotspot_auth = HotspotAuth::ProtectedProfile;
     options.wifi_interface = "missing0".into();
     assert!(matches!(
         Nm::discover(&conn, &options).await,
@@ -954,6 +955,74 @@ async fn protected_hotspot_requires_a_provisioned_rsn_profile() {
     nm.hotspot().await.unwrap();
     assert_eq!(nm.snapshot().await.unwrap().status.mode, "hotspot");
     assert_eq!(state.lock().unwrap().activation_paths, [RECOVERY]);
+}
+
+#[tokio::test]
+async fn open_profile_activates_automatically_and_rechecks_the_ap_for_a_lease() {
+    let bus = PrivateBus::start();
+    let mut fake = FakeState::new(Outcome::Success);
+    let open = copy_settings(&fake.profiles[RECOVERY].settings);
+    fake.protect_recovery();
+    fake.restart();
+    let state = Arc::new(Mutex::new(fake));
+    let _nm = fake_nm(&bus, state.clone()).await;
+    let mut options = test_options();
+    options.hotspot_auth = HotspotAuth::OpenProfile;
+    let (mut core, api) = controller_options(&bus, options).await;
+    core.reconcile_inner().await.unwrap();
+    core.grace = Some(Instant::now());
+    assert_eq!(core.reconcile_inner().await, Err("invalid-hotspot-profile"));
+    let mut recovery = state.lock().unwrap().profiles.remove(RECOVERY).unwrap();
+    assert_eq!(core.reconcile_inner().await, Err("missing-hotspot-profile"));
+    let protected = std::mem::replace(&mut recovery.settings, open);
+    recovery.unsaved = true;
+    state
+        .lock()
+        .unwrap()
+        .profiles
+        .insert(RECOVERY.into(), recovery);
+    assert_eq!(core.reconcile_inner().await, Err("invalid-hotspot-profile"));
+    {
+        let mut s = state.lock().unwrap();
+        assert!(s.activation_paths.is_empty());
+        assert_eq!(s.next_profile, 3, "no fallback profile may be created");
+        s.profiles.get_mut(RECOVERY).unwrap().unsaved = false;
+    }
+    core.reconcile_inner().await.unwrap();
+    core.reconcile_inner().await.unwrap();
+    assert_eq!(api.status().mode, "hotspot");
+
+    let client = bus.connect().await;
+    let proxy = Proxy::new(&client, SERVICE, PATH, INTERFACE).await.unwrap();
+    let token: String = proxy.call("Reserve", &("",)).await.unwrap();
+    assert!(proxy
+        .call::<_, _, bool>("Authorized", &(&token,))
+        .await
+        .unwrap());
+    assert!(proxy.call::<_, _, String>("Reserve", &("",)).await.is_err());
+    let connect = |token: &str| (b"network".to_vec(), "open", "", "", token.to_owned());
+    assert!(proxy
+        .call::<_, _, u64>("Connect", &connect(""))
+        .await
+        .is_err());
+    let _: u64 = proxy.call("Connect", &connect(&token)).await.unwrap();
+
+    // A queued request still has to validate the applied AP under the network lock.
+    state.lock().unwrap().applied_override = Some(protected);
+    let Some(Command::Connect {
+        request, cancelled, ..
+    }) = core.commands.recv().await
+    else {
+        panic!("no queued attempt");
+    };
+    assert_eq!(core.attempt(&request, &cancelled).await, Err("not-hotspot"));
+    assert!(api.shared.lock().unwrap().reservation.is_none());
+    let s = state.lock().unwrap();
+    assert_eq!(s.checkpoint_generation, 0);
+    assert_eq!(s.next_profile, 3);
+    assert_eq!(s.activation_paths, [RECOVERY]);
+    assert_eq!(s.secrets_count, 0);
+    std::fs::remove_file(core.options.network_guard).unwrap();
 }
 
 #[tokio::test]
@@ -1008,7 +1077,7 @@ async fn protected_connect_rechecks_the_lease_and_ap_before_checkpoint() {
         state.lock().unwrap().protect_recovery();
         let owner = fake_nm(&bus, state.clone()).await;
         let mut options = test_options();
-        options.protected_hotspot = true;
+        options.hotspot_auth = HotspotAuth::ProtectedProfile;
         options.wifi_interface = "wlan0".into();
         let (mut core, api) = controller_options(&bus, options).await;
         core.reconcile_inner().await.unwrap();

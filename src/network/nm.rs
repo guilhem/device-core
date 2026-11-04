@@ -1,8 +1,8 @@
 //! NetworkManager's native system-bus API. Mutations target one unique bus owner.
-//! The final protected AP read uses the well-known name and verifies the reply sender.
+//! The final provisioned AP read uses the well-known name and verifies the reply sender.
 
 use super::{NetworkInfo, Profile, Status};
-use crate::options::Options;
+use crate::options::{HotspotAuth, Options};
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::future::Future;
@@ -231,7 +231,7 @@ impl Nm {
                     && status.profile_uuid == self.options.hotspot_uuid
                     && status.address == self.options.hotspot_address
                 {
-                    if !self.options.protected_hotspot {
+                    if !self.options.hotspot_auth.requires_saved_profile() {
                         status.mode = "hotspot".into();
                     } else if self.provisioned_hotspot(&settings_path, &settings).await? {
                         // The stored profile may have changed without changing the running AP.
@@ -245,7 +245,7 @@ impl Nm {
                             .await?;
                         let current = self.active_connection().await?;
                         if current == active
-                            && self.protected_profile(&applied)
+                            && self.matches_hotspot_profile(&applied)
                             && self
                                 .property::<u32>(self.device.as_str(), DEVICE, "State")
                                 .await?
@@ -475,22 +475,31 @@ impl Nm {
         Ok(())
     }
 
-    fn protected_profile(&self, settings: &Settings) -> bool {
-        text(settings, "connection", "uuid") == self.options.hotspot_uuid
-            && text(settings, "connection", "type") == "802-11-wireless"
-            && text(settings, "802-11-wireless", "mode") == "ap"
-            && text(settings, WIFI_SECURITY, "key-mgmt") == "wpa-psk"
-            && settings.get(WIFI_SECURITY).is_some_and(|security| {
-                let proto = security
-                    .get("proto")
-                    .and_then(|value| Vec::<String>::try_from(value.try_clone().ok()?).ok());
-                proto
-                    .as_deref()
-                    .is_some_and(|protocols| protocols == ["rsn"])
-                    && security
-                        .get("psk-flags")
-                        .is_none_or(|flags| u32::try_from(flags).ok() == Some(0))
-            })
+    fn matches_hotspot_profile(&self, settings: &Settings) -> bool {
+        if text(settings, "connection", "uuid") != self.options.hotspot_uuid
+            || text(settings, "connection", "type") != "802-11-wireless"
+            || text(settings, "802-11-wireless", "mode") != "ap"
+        {
+            return false;
+        }
+        match self.options.hotspot_auth {
+            HotspotAuth::Presence => false,
+            HotspotAuth::OpenProfile => !settings.contains_key(WIFI_SECURITY),
+            HotspotAuth::ProtectedProfile => {
+                text(settings, WIFI_SECURITY, "key-mgmt") == "wpa-psk"
+                    && settings.get(WIFI_SECURITY).is_some_and(|security| {
+                        let proto = security.get("proto").and_then(|value| {
+                            Vec::<String>::try_from(value.try_clone().ok()?).ok()
+                        });
+                        proto
+                            .as_deref()
+                            .is_some_and(|protocols| protocols == ["rsn"])
+                            && security
+                                .get("psk-flags")
+                                .is_none_or(|flags| u32::try_from(flags).ok() == Some(0))
+                    })
+            }
+        }
     }
 
     async fn provisioned_hotspot(
@@ -498,7 +507,7 @@ impl Nm {
         path: &OwnedObjectPath,
         settings: &Settings,
     ) -> Result<bool> {
-        Ok(self.protected_profile(settings)
+        Ok(self.matches_hotspot_profile(settings)
             && !self
                 .property::<bool>(path.as_str(), CONNECTION, "Unsaved")
                 .await?)
@@ -521,10 +530,12 @@ impl Nm {
                 if text(&settings, "802-11-wireless", "mode") != "ap" {
                     return Err("invalid-hotspot-profile");
                 }
-                if self.options.protected_hotspot {
-                    if !self.provisioned_hotspot(&path, &settings).await? {
-                        return Err("invalid-hotspot-profile");
-                    }
+                if self.options.hotspot_auth.requires_saved_profile()
+                    && !self.provisioned_hotspot(&path, &settings).await?
+                {
+                    return Err("invalid-hotspot-profile");
+                }
+                if self.options.hotspot_auth == HotspotAuth::ProtectedProfile {
                     // GetSettings never returns secrets. Require a system-owned PSK.
                     let secrets: Settings = self
                         .call(path.as_str(), CONNECTION, "GetSecrets", &(WIFI_SECURITY,))
@@ -536,7 +547,7 @@ impl Nm {
                 return self.activate(&path).await;
             }
         }
-        if self.options.protected_hotspot {
+        if self.options.hotspot_auth.requires_saved_profile() {
             return Err("missing-hotspot-profile");
         }
         let machine = std::fs::read_to_string("/etc/machine-id").unwrap_or_default();

@@ -1,7 +1,7 @@
 # Wi-Fi setup portal
 
-The optional Wi-Fi setup portal lets someone connected to a device's protected
-recovery hotspot choose a Wi-Fi network from a browser. The interface is in
+The optional Wi-Fi setup portal lets someone connected to a device's recovery
+hotspot choose a Wi-Fi network from a browser. The interface is in
 French. Device-core runs the network controller; the portal is a separate
 process and can be omitted from appliances that use another setup flow.
 
@@ -18,7 +18,7 @@ device-core-wifi-portal --hotspot-address 10.77.0.1
 
 Use the actual IPv4 address of your hotspot. The option is required and accepts
 a literal address without a port or prefix. The portal listens on that address
-on TCP port 80 and waits for the address to become available. Join the protected
+on TCP port 80 and waits for the address to become available. Join the recovery
 hotspot and open `http://10.77.0.1/` in this example. Use the address directly;
 the portal requires an exact Host and, for form submissions, a matching
 `http://` Origin. It does not support reverse proxies or forwarded headers.
@@ -30,18 +30,20 @@ and reopen the portal to check the outcome.
 
 ## Appliance prerequisites
 
-- **Protected hotspot:** Provision a system-owned NetworkManager AP profile on
-  the selected Wi-Fi interface with shared IPv4, WPA2
-  (`wifi-security.key-mgmt=wpa-psk`, `wifi-security.proto=rsn`), and a strong,
-  device-specific PSK. Keep the profile readable only by root. Configure
-  device-core with `DEVICE_CORE_HOTSPOT_AUTH=protected-profile`,
-  `DEVICE_CORE_WIFI_INTERFACE`, and `DEVICE_CORE_HOTSPOT_ADDRESS` matching the
+- **Recovery hotspot:** Provision a system-owned NetworkManager AP profile on
+  the selected Wi-Fi interface with shared IPv4. For a WPA2 hotspot, use a strong,
+  device-specific PSK, keep the profile readable only by root, and set
+  `DEVICE_CORE_HOTSPOT_AUTH=protected-profile`. For passwordless recovery, omit
+  the Wi-Fi security section and set `DEVICE_CORE_HOTSPOT_AUTH=open-profile`.
+  Any nearby client that joins an open hotspot can request setup; HTTP on that
+  hotspot does not encrypt the submitted Wi-Fi password. Set
+  `DEVICE_CORE_WIFI_INTERFACE` and match `DEVICE_CORE_HOTSPOT_ADDRESS` to the
   portal argument. Use the default profile UUID
   `64657669-6365-4000-8000-000000000001` or set `DEVICE_CORE_HOTSPOT_UUID` to
   the provisioned UUID. Keep device-core's optional HTTP listener disabled.
-  See the [Network API](network.md#protected-recovery-hotspot).
+  See the [Network API](network.md#recovery-hotspot-profiles).
 - **Interface firewall:** Allow inbound TCP port 80 to the configured address
-  only on the protected AP interface. Drop traffic to that address and port on
+  only on the recovery AP interface. Drop traffic to that address and port on
   every other interface before any broad accept rules. An address bind and HTTP
   checks cannot identify the ingress interface. Do not expose the portal to
   other networks.
