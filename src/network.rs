@@ -20,7 +20,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use zbus::object_server::SignalEmitter;
-use zbus::zvariant::{OwnedFd, Type};
+use zbus::zvariant::{OwnedFd, OwnedObjectPath, Type};
 use zbus::{fdo, Connection};
 
 #[cfg(test)]
@@ -118,6 +118,7 @@ struct Shared {
     networks: Vec<NetworkInfo>,
     profiles: Vec<Profile>,
     reservation: Option<Reservation>,
+    hotspot: Option<(String, OwnedObjectPath)>,
     active: Option<(u64, Arc<AtomicBool>)>,
     committing: bool,
     next_attempt: u64,
@@ -132,6 +133,7 @@ impl Default for Shared {
             networks: Vec::new(),
             profiles: Vec::new(),
             reservation: None,
+            hotspot: None,
             active: None,
             committing: false,
             next_attempt: 0,
@@ -177,12 +179,23 @@ impl Shared {
         }
     }
 
+    fn observe_nm(&mut self, owner: &str, snapshot: nm::Snapshot) {
+        let hotspot = snapshot.hotspot.map(|path| (owner.to_owned(), path));
+        if self.hotspot != hotspot {
+            self.reservation = None;
+            self.hotspot = hotspot;
+        }
+        self.observe(snapshot.status);
+    }
+
     fn observe(&mut self, mut status: Status) {
         status.attempt_id = self.status.attempt_id;
         status.phase = self.status.phase.clone();
         status.error = self.status.error.clone();
         // Presence and reservation cannot survive a completed radio transition.
-        if self.status.mode == "hotspot" && status.mode == "client" {
+        if (status.mode != "hotspot" && self.hotspot.take().is_some())
+            || (self.status.mode == "hotspot" && status.mode == "client")
+        {
             self.reservation = None;
         }
         if (
@@ -236,7 +249,7 @@ struct Request {
     security: String,
     password: String,
     uuid: String,
-    setup: bool,
+    token: String,
 }
 
 impl Request {
@@ -319,7 +332,10 @@ impl Network {
         }
         let now = monotonic();
         let mut s = self.shared.lock().unwrap();
-        if s.status.mode != "hotspot" || s.active.is_some() {
+        if s.status.mode != "hotspot"
+            || s.active.is_some()
+            || (self.options.protected_hotspot && s.hotspot.is_none())
+        {
             return Err(fdo::Error::Failed("not-hotspot".into()));
         }
         if token.is_empty() {
@@ -333,7 +349,7 @@ impl Network {
                 created: now,
                 last_press: now,
                 expires: now + LEASE,
-                authorized_until: None,
+                authorized_until: self.options.protected_hotspot.then_some(now + LEASE),
             });
             Ok(token)
         } else if let Some(r) = s
@@ -342,6 +358,9 @@ impl Network {
             .filter(|r| r.token == token && now < r.expires)
         {
             r.expires = now + LEASE;
+            if self.options.protected_hotspot {
+                r.authorized_until = Some(r.expires);
+            }
             Ok(r.token.clone())
         } else {
             Err(fdo::Error::AccessDenied("invalid-reservation".into()))
@@ -349,7 +368,8 @@ impl Network {
     }
 
     pub fn authorized(&self, token: &str) -> bool {
-        self.shared.lock().unwrap().authorized(token, monotonic())
+        let s = self.shared.lock().unwrap();
+        (!self.options.protected_hotspot || s.active.is_none()) && s.authorized(token, monotonic())
     }
 
     pub fn release(&self, token: &str) -> fdo::Result<()> {
@@ -378,14 +398,18 @@ impl Network {
             security: security.into(),
             password: password.into(),
             uuid: uuid.into(),
-            setup: !token.is_empty(),
+            token: token.into(),
         };
         request.validate(&self.options.hotspot_uuid)?;
         let mut s = self.shared.lock().unwrap();
         if s.active.is_some() {
             return Err(fdo::Error::Failed("network-busy".into()));
         }
-        if request.setup && !s.authorized(token, monotonic()) {
+        if self.options.protected_hotspot && !s.authorized(token, monotonic()) {
+            return Err(fdo::Error::AccessDenied("invalid-reservation".into()));
+        }
+        if !self.options.protected_hotspot && !token.is_empty() && !s.authorized(token, monotonic())
+        {
             return Err(fdo::Error::AccessDenied(
                 "physical-confirmation-required".into(),
             ));
@@ -406,7 +430,7 @@ impl Network {
                 cancelled: cancelled.clone(),
             })
             .map_err(|_| fdo::Error::Failed("network-busy".into()))?;
-        if !token.is_empty() {
+        if !self.options.protected_hotspot && !token.is_empty() {
             if let Some(r) = s.reservation.as_mut() {
                 r.authorized_until = None;
             }
@@ -606,6 +630,9 @@ impl Controller {
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         let result = self.attempt(&request, &cancelled).await;
                         let mut s = self.shared.lock().unwrap();
+                        if self.options.protected_hotspot {
+                            s.reservation = None;
+                        }
                         s.finish_attempt(id, result, monotonic());
                     }
                     Some(Command::Scan) => {
@@ -680,8 +707,9 @@ impl Controller {
                             || snapshot.status.mode != s.status.mode
                             || snapshot.status.address != s.status.address
                             || snapshot.status.profile_uuid != s.status.profile_uuid
+                            || (self.options.protected_hotspot && snapshot.status.mode == "hotspot")
                         {
-                            s.observe(snapshot.status);
+                            s.observe_nm(&nm.owner, snapshot);
                         }
                     } else {
                         self.shared.lock().unwrap().observe(Status::unavailable());
@@ -734,7 +762,7 @@ impl Controller {
         let snapshot = nm.snapshot().await?;
         let mode = snapshot.status.mode.clone();
         let previous = self.shared.lock().unwrap().status.mode.clone();
-        self.shared.lock().unwrap().observe(snapshot.status);
+        self.shared.lock().unwrap().observe_nm(&nm.owner, snapshot);
         self.refresh_networks(&nm).await;
         if !checkpoints.is_empty() {
             return Ok(());
@@ -749,10 +777,14 @@ impl Controller {
             self.retry = now + RETRY;
         } else if mode == "hotspot" {
             self.grace = None;
-            let reserved = self.shared.lock().unwrap().reserved(monotonic());
-            if now >= self.retry && !reserved && self.shared.lock().unwrap().active.is_none() {
-                self.retry = now + RETRY;
-                let networks = self.shared.lock().unwrap().networks.clone();
+            if now >= self.retry {
+                let networks = {
+                    let s = self.shared.lock().unwrap();
+                    if s.reserved(monotonic()) || s.active.is_some() {
+                        return Ok(());
+                    }
+                    s.networks.clone()
+                };
                 // Prefer a visible native profile; otherwise let the first known
                 // one try (hidden networks do not appear in scan results).
                 let known = networks
@@ -764,12 +796,18 @@ impl Controller {
                     })
                     .or_else(|| profiles.iter().find(|p| !p.candidate));
                 if let Some(known) = known {
-                    // Make the transition visible before awaiting NM. A new
-                    // reservation cannot be granted after the retry has begun.
-                    self.shared.lock().unwrap().observe(Status::reconnecting());
+                    {
+                        // Reserve and retry must agree on who owns the radio.
+                        let mut s = self.shared.lock().unwrap();
+                        if s.reserved(monotonic()) || s.active.is_some() {
+                            return Ok(());
+                        }
+                        s.observe(Status::reconnecting());
+                    }
                     let _ = nm.activate(&known.path).await;
                     self.grace = Some(now + GRACE);
                 }
+                self.retry = now + RETRY;
             }
         } else {
             if self.grace.is_none() || previous == "client" {
@@ -786,7 +824,7 @@ impl Controller {
 
     fn sim_reconcile(&mut self) -> nm::Result<()> {
         let mut s = self.shared.lock().unwrap();
-        if s.status.mode == "unavailable" {
+        if !self.options.protected_hotspot && s.status.mode == "unavailable" {
             let mut status = Status::reconnecting();
             status.mode = "hotspot".into();
             status.profile_uuid = self.options.hotspot_uuid.clone();
@@ -866,10 +904,6 @@ impl Controller {
             return Err("cancelled");
         }
         let nm = Nm::discover(&self.bus, &self.options).await?;
-        let before = nm.snapshot().await?;
-        if request.setup && before.status.mode != "hotspot" {
-            return Err("not-hotspot");
-        }
         if !nm.checkpoints().await?.is_empty() {
             return Err("network-busy");
         }
@@ -898,6 +932,52 @@ impl Controller {
             &request.security,
             &request.password,
         );
+        if !self.options.wifi_interface.is_empty() {
+            settings.get_mut("connection").unwrap().insert(
+                "interface-name".into(),
+                nm::string(&self.options.wifi_interface),
+            );
+        }
+        let before = nm.snapshot().await?;
+        let current = if self.options.protected_hotspot {
+            if Nm::current_owner(&self.bus).await? != nm.owner {
+                self.shared.lock().unwrap().observe(Status::unavailable());
+                return Err("nm-owner-changed");
+            }
+            // The same owner can replace the AP while the snapshot or owner check is pending.
+            Some(nm.active_connection().await.inspect_err(|_| {
+                self.shared.lock().unwrap().observe(Status::unavailable());
+            })?)
+        } else {
+            None
+        };
+        {
+            let mut s = self.shared.lock().unwrap();
+            if let Some(active) = &current {
+                if before.hotspot.as_ref().is_some_and(|path| path != active) {
+                    s.observe(Status::unavailable());
+                    return Err("not-hotspot");
+                }
+                if !s.hotspot.as_ref().is_some_and(|(owner, observed)| {
+                    *owner == nm.owner && before.hotspot.as_ref() == Some(observed)
+                }) {
+                    s.observe_nm(&nm.owner, before);
+                    return Err("not-hotspot");
+                }
+            } else if !request.token.is_empty() && before.status.mode != "hotspot" {
+                return Err("not-hotspot");
+            }
+            if cancelled.load(Ordering::SeqCst) {
+                return Err("cancelled");
+            }
+            if current.is_some() {
+                if !s.authorized(&request.token, monotonic()) {
+                    return Err("invalid-reservation");
+                }
+                // Consume only after the locked check; no browser is needed after this point.
+                s.reservation = None;
+            }
+        }
         let started = Instant::now();
         let checkpoint = nm.checkpoint().await?;
         let mut candidate = None;
@@ -1034,8 +1114,11 @@ impl Controller {
                 {
                     current_nm.activate(&previous.path).await?;
                 }
-                let status = current_nm.snapshot().await?.status;
-                self.shared.lock().unwrap().observe(status);
+                let snapshot = current_nm.snapshot().await?;
+                self.shared
+                    .lock()
+                    .unwrap()
+                    .observe_nm(&current_nm.owner, snapshot);
                 Ok(false)
             }
             .await;
@@ -1072,7 +1155,7 @@ impl Controller {
                 }
             }
             if let Ok(snapshot) = nm.snapshot().await {
-                self.shared.lock().unwrap().observe(snapshot.status);
+                self.shared.lock().unwrap().observe_nm(&nm.owner, snapshot);
             } else {
                 self.shared.lock().unwrap().observe(Status::unavailable());
             }
