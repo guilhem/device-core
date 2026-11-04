@@ -20,6 +20,7 @@ use zbus::{ObjectServer, Proxy};
 
 const DEV: &str = "/org/freedesktop/NetworkManager/Devices/1";
 const ACT: &str = "/org/freedesktop/NetworkManager/ActiveConnection/1";
+const ACT2: &str = "/org/freedesktop/NetworkManager/ActiveConnection/2";
 const IP: &str = "/org/freedesktop/NetworkManager/IP4Config/1";
 const AP: &str = "/org/freedesktop/NetworkManager/AccessPoint/1";
 const CP: &str = "/org/freedesktop/NetworkManager/Checkpoint/1";
@@ -104,6 +105,11 @@ struct Checkpoint {
     address: String,
 }
 struct FakeState {
+    state_gate: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
+    address_gate: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
+    applied_gate: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
+    applied_override: Option<Settings>,
+    active_path: &'static str,
     profiles: BTreeMap<String, FakeProfile>,
     active: String,
     state: u32,
@@ -157,6 +163,11 @@ impl FakeState {
             .unwrap()
             .insert("mode".into(), nm::string("ap"));
         Self {
+            state_gate: None,
+            address_gate: None,
+            applied_gate: None,
+            applied_override: None,
+            active_path: ACT,
             profiles: BTreeMap::from([
                 (
                     OLD.into(),
@@ -208,6 +219,27 @@ impl FakeState {
             update_paths: Vec::new(),
             secrets_count: 0,
         }
+    }
+    fn protect_recovery(&mut self) {
+        let security = "802-11-wireless-security";
+        let mut protected = nm::wifi_settings(
+            HOTSPOT_UUID,
+            "Device recovery",
+            b"Device",
+            "wpa-psk",
+            "testpassword",
+        );
+        protected
+            .get_mut("802-11-wireless")
+            .unwrap()
+            .insert("mode".into(), nm::string("ap"));
+        protected.get_mut(security).unwrap().insert(
+            "proto".into(),
+            zbus::zvariant::Value::from(vec!["rsn"])
+                .try_to_owned()
+                .unwrap(),
+        );
+        self.profiles.get_mut(RECOVERY).unwrap().settings = protected;
     }
     fn rollback(&mut self) {
         if let Some(cp) = self.checkpoint.take() {
@@ -600,8 +632,16 @@ impl DeviceApi {
         2
     }
     #[zbus(property)]
-    fn state(&self) -> u32 {
-        self.0.lock().unwrap().state
+    async fn state(&self) -> u32 {
+        let (gate, state) = {
+            let mut s = self.0.lock().unwrap();
+            (s.state_gate.take(), s.state)
+        };
+        if let Some((entered, resume)) = gate {
+            entered.send(()).unwrap();
+            resume.await.unwrap();
+        }
+        state
     }
     #[zbus(property)]
     fn state_reason(&self) -> (u32, u32) {
@@ -610,11 +650,36 @@ impl DeviceApi {
     }
     #[zbus(property)]
     fn active_connection(&self) -> OwnedObjectPath {
-        if self.0.lock().unwrap().active.is_empty() {
-            path("/")
+        let s = self.0.lock().unwrap();
+        path(if s.active.is_empty() {
+            "/"
         } else {
-            path(ACT)
+            s.active_path
+        })
+    }
+    #[zbus(property)]
+    fn interface(&self) -> &str {
+        "wlan0"
+    }
+    async fn get_applied_connection(&self, flags: u32) -> (Settings, u64) {
+        assert_eq!(flags, 0);
+        let (gate, mut applied) = {
+            let mut s = self.0.lock().unwrap();
+            let applied = copy_settings(
+                s.applied_override
+                    .as_ref()
+                    .unwrap_or(&s.profiles[&s.active].settings),
+            );
+            (s.applied_gate.take(), applied)
+        };
+        if let Some((entered, resume)) = gate {
+            entered.send(()).unwrap();
+            resume.await.unwrap();
         }
+        if let Some(security) = applied.get_mut("802-11-wireless-security") {
+            security.remove("psk");
+        }
+        (applied, 1)
     }
 }
 struct WifiApi(Fake);
@@ -682,11 +747,13 @@ impl IpApi {
             if s.checkpoint.is_some() && s.mode == 2 {
                 s.client_snapshots += 1;
             }
-            if s.client_snapshots >= 2 {
-                s.final_snapshot_gate.take()
-            } else {
-                None
-            }
+            s.address_gate.take().or_else(|| {
+                if s.client_snapshots >= 2 {
+                    s.final_snapshot_gate.take()
+                } else {
+                    None
+                }
+            })
         };
         if let Some((entered, resume)) = gate {
             entered.send(()).unwrap();
@@ -749,6 +816,8 @@ async fn fake_nm(bus: &PrivateBus, state: Fake) -> Connection {
         .unwrap()
         .serve_at(ACT, ActiveApi(state.clone()))
         .unwrap()
+        .serve_at(ACT2, ActiveApi(state.clone()))
+        .unwrap()
         .serve_at(IP, IpApi(state.clone()))
         .unwrap()
         .serve_at(AP, ApApi)
@@ -810,7 +879,7 @@ fn request(uuid: &str) -> Request {
         security: "wpa-psk".into(),
         password: "newpassword".into(),
         uuid: uuid.into(),
-        setup: false,
+        token: String::new(),
     }
 }
 
@@ -828,6 +897,313 @@ async fn reached_gate(waiting: oneshot::Receiver<()>) {
         .await
         .expect("operation did not reach gate")
         .unwrap();
+}
+
+#[tokio::test]
+async fn protected_hotspot_requires_a_provisioned_rsn_profile() {
+    let bus = PrivateBus::start();
+    let state = Arc::new(Mutex::new(FakeState::new(Outcome::Success)));
+    let _nm = fake_nm(&bus, state.clone()).await;
+    let conn = bus.connect().await;
+    let mut options = test_options();
+    options.protected_hotspot = true;
+    options.wifi_interface = "missing0".into();
+    assert!(matches!(
+        Nm::discover(&conn, &options).await,
+        Err("no-wifi-device")
+    ));
+    options.wifi_interface = "wlan0".into();
+    let nm = Nm::discover(&conn, &options).await.unwrap();
+
+    assert_eq!(nm.hotspot().await, Err("invalid-hotspot-profile"));
+    assert_ne!(nm.snapshot().await.unwrap().status.mode, "hotspot");
+    {
+        let mut s = state.lock().unwrap();
+        let open = copy_settings(&s.profiles[RECOVERY].settings);
+        s.protect_recovery();
+        s.applied_override = Some(open);
+    }
+    // An edited saved profile does not make the old open AP safe.
+    assert_ne!(nm.snapshot().await.unwrap().status.mode, "hotspot");
+    let protected = {
+        let mut s = state.lock().unwrap();
+        s.applied_override = None;
+        let p = s.profiles.get_mut(RECOVERY).unwrap();
+        let protected = copy_settings(&p.settings);
+        p.settings
+            .get_mut("802-11-wireless-security")
+            .unwrap()
+            .remove("psk");
+        protected
+    };
+    assert_eq!(nm.hotspot().await, Err("missing-hotspot-secret"));
+    let recovery = state.lock().unwrap().profiles.remove(RECOVERY).unwrap();
+    assert_eq!(nm.hotspot().await, Err("missing-hotspot-profile"));
+    {
+        let mut s = state.lock().unwrap();
+        assert!(s.activation_paths.is_empty());
+        assert_eq!(s.profiles.len(), 1, "no fallback profile may be created");
+        s.profiles.insert(
+            RECOVERY.into(),
+            FakeProfile {
+                settings: protected,
+                ..recovery
+            },
+        );
+    }
+    nm.hotspot().await.unwrap();
+    assert_eq!(nm.snapshot().await.unwrap().status.mode, "hotspot");
+    assert_eq!(state.lock().unwrap().activation_paths, [RECOVERY]);
+}
+
+#[tokio::test]
+async fn final_ap_read_rejects_handoff_from_a_live_owner() {
+    let bus = PrivateBus::start();
+    let old_state = Arc::new(Mutex::new(FakeState::new(Outcome::Success)));
+    let new_state = Arc::new(Mutex::new(FakeState::new(Outcome::Success)));
+    let old_owner = fake_nm(&bus, old_state.clone()).await;
+    let conn = bus.connect().await;
+    let nm = Nm::discover(&conn, &test_options()).await.unwrap();
+    assert_eq!(nm.verified_active_connection().await.unwrap(), path(ACT));
+
+    // Transfer the name after the old flow's separate owner check, before its final read.
+    assert_eq!(Nm::current_owner(&conn).await.unwrap(), nm.owner);
+    old_owner.release_name(NM).await.unwrap();
+    let new_owner = fake_nm(&bus, new_state.clone()).await;
+    assert_ne!(old_owner.unique_name(), new_owner.unique_name());
+    // Both owners report the same path, and the old unique address still answers.
+    assert_eq!(nm.active_connection().await.unwrap(), path(ACT));
+    let replacement = Nm::discover(&conn, &test_options()).await.unwrap();
+    assert_eq!(replacement.active_connection().await.unwrap(), path(ACT));
+
+    assert_eq!(
+        nm.verified_active_connection().await,
+        Err("nm-owner-changed")
+    );
+    for state in [old_state, new_state] {
+        let s = state.lock().unwrap();
+        assert_eq!(s.checkpoint_generation, 0);
+        assert_eq!(s.next_profile, 3);
+    }
+}
+
+#[tokio::test]
+async fn protected_connect_rechecks_the_lease_and_ap_before_checkpoint() {
+    for stage in [
+        "expired",
+        "released",
+        "replacement",
+        "late-replacement",
+        "owner",
+        "rollback",
+        "success",
+    ] {
+        let bus = PrivateBus::start();
+        let outcome = if stage == "rollback" {
+            Outcome::Auth
+        } else {
+            Outcome::Success
+        };
+        let state = Arc::new(Mutex::new(FakeState::new(outcome)));
+        state.lock().unwrap().protect_recovery();
+        let owner = fake_nm(&bus, state.clone()).await;
+        let mut options = test_options();
+        options.protected_hotspot = true;
+        options.wifi_interface = "wlan0".into();
+        let (mut core, api) = controller_options(&bus, options).await;
+        core.reconcile_inner().await.unwrap();
+
+        let client = bus.connect().await;
+        let proxy = Proxy::new(&client, SERVICE, PATH, INTERFACE).await.unwrap();
+        let connect = |token: String| (b"network".to_vec(), "wpa-psk", "testpassword", "", token);
+        assert!(proxy
+            .call::<_, _, u64>("Connect", &connect(String::new()))
+            .await
+            .is_err());
+        let stale: String = proxy.call("Reserve", &("",)).await.unwrap();
+        api.shared
+            .lock()
+            .unwrap()
+            .reservation
+            .as_mut()
+            .unwrap()
+            .expires = monotonic();
+        assert!(!proxy
+            .call::<_, _, bool>("Authorized", &(&stale,))
+            .await
+            .unwrap());
+        assert!(proxy
+            .call::<_, _, u64>("Connect", &connect(stale))
+            .await
+            .is_err());
+        let token: String = proxy.call("Reserve", &("",)).await.unwrap();
+        assert!(!token.is_empty());
+        assert!(proxy
+            .call::<_, _, bool>("Authorized", &(&token,))
+            .await
+            .unwrap());
+        assert!(proxy
+            .call::<_, _, u64>("Connect", &connect("other".into()))
+            .await
+            .is_err());
+        let _: u64 = proxy
+            .call("Connect", &connect(token.clone()))
+            .await
+            .unwrap();
+        assert!(proxy
+            .call::<_, _, u64>("Connect", &connect(token.clone()))
+            .await
+            .is_err());
+        drop(proxy);
+        drop(client);
+
+        let (entered, waiting) = oneshot::channel();
+        let (resume, paused) = oneshot::channel();
+        state.lock().unwrap().applied_gate = Some((entered, paused));
+        let Some(Command::Connect {
+            id,
+            request,
+            cancelled,
+        }) = core.commands.recv().await
+        else {
+            panic!("no queued attempt");
+        };
+        let attempt = tokio::spawn(async move {
+            let result = core.attempt(&request, &cancelled).await;
+            (core, result)
+        });
+        reached_gate(waiting).await;
+        assert!(matches!(api.guard.shared(), Err("network-guard-busy")));
+        let resume = if stage == "late-replacement" {
+            // The snapshot reads ActiveConnection before its second Device.State read.
+            let (entered, waiting) = oneshot::channel();
+            let (resume_state, paused) = oneshot::channel();
+            state.lock().unwrap().state_gate = Some((entered, paused));
+            resume.send(()).unwrap();
+            reached_gate(waiting).await;
+            resume_state
+        } else {
+            resume
+        };
+        let _replacement = match stage {
+            "expired" => {
+                api.shared
+                    .lock()
+                    .unwrap()
+                    .reservation
+                    .as_mut()
+                    .unwrap()
+                    .expires = monotonic();
+                None
+            }
+            "released" => {
+                api.release(&token).unwrap();
+                None
+            }
+            "replacement" | "late-replacement" => {
+                state.lock().unwrap().active_path = ACT2;
+                None
+            }
+            "owner" => {
+                owner.release_name(NM).await.unwrap();
+                Some(fake_nm(&bus, state.clone()).await)
+            }
+            _ => None,
+        };
+        resume.send(()).unwrap();
+        let (core, result) = attempt.await.unwrap();
+        if stage == "late-replacement" {
+            let s = state.lock().unwrap();
+            assert_eq!(s.checkpoint_generation, 0, "checkpoint on a replaced AP");
+            assert_eq!(s.next_profile, 3, "candidate on a replaced AP");
+            let shared = api.shared.lock().unwrap();
+            assert!(shared.hotspot.is_none());
+            assert!(shared.reservation.is_none());
+        }
+        assert_eq!(
+            result,
+            match stage {
+                "expired" | "released" => Err("invalid-reservation"),
+                "replacement" | "late-replacement" => Err("not-hotspot"),
+                "owner" => Err("nm-owner-changed"),
+                "rollback" => Err("wifi-authentication-failed"),
+                _ => Ok(()),
+            },
+            "{stage}"
+        );
+        let s = state.lock().unwrap();
+        assert_eq!(
+            s.checkpoint_generation,
+            usize::from(matches!(stage, "rollback" | "success"))
+        );
+        assert!(s.checkpoint.is_none());
+        if stage == "success" {
+            assert_eq!(
+                nm::text(
+                    &s.profiles[&s.active].settings,
+                    "connection",
+                    "interface-name"
+                ),
+                "wlan0"
+            );
+        } else {
+            assert_eq!(s.active, RECOVERY);
+            assert_eq!(s.profiles.len(), 2);
+            assert_eq!(s.profiles[OLD].version, 1);
+        }
+        drop(s);
+        api.shared
+            .lock()
+            .unwrap()
+            .finish_attempt(id, result, monotonic());
+        assert!(!api.authorized(&token));
+        assert!(api
+            .connect(b"network".to_vec(), "wpa-psk", "testpassword", "", &token)
+            .is_err());
+        std::fs::remove_file(core.options.network_guard).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn default_connect_cancelled_during_snapshot_stops_before_checkpoint() {
+    let bus = PrivateBus::start();
+    let state = Arc::new(Mutex::new(FakeState::new(Outcome::Success)));
+    let _nm = fake_nm(&bus, state.clone()).await;
+    let (mut core, _) = controller(&bus).await;
+    core.reconcile_inner().await.unwrap();
+
+    let client = bus.connect().await;
+    let proxy = Proxy::new(&client, SERVICE, PATH, INTERFACE).await.unwrap();
+    let id: u64 = proxy
+        .call(
+            "Connect",
+            &(b"network".to_vec(), "wpa-psk", "testpassword", "", ""),
+        )
+        .await
+        .unwrap();
+    let (entered, waiting) = oneshot::channel();
+    let (resume, paused) = oneshot::channel();
+    state.lock().unwrap().address_gate = Some((entered, paused));
+    let Some(Command::Connect {
+        request, cancelled, ..
+    }) = core.commands.recv().await
+    else {
+        panic!("no queued attempt");
+    };
+    let attempt = tokio::spawn(async move {
+        let result = core.attempt(&request, &cancelled).await;
+        (core, result)
+    });
+    reached_gate(waiting).await;
+    proxy.call::<_, _, ()>("Cancel", &(id,)).await.unwrap();
+    resume.send(()).unwrap();
+
+    let (core, result) = attempt.await.unwrap();
+    assert_eq!(result, Err("cancelled"));
+    let s = state.lock().unwrap();
+    assert_eq!(s.checkpoint_generation, 0, "checkpoint after cancellation");
+    assert_eq!(s.next_profile, 3, "candidate after cancellation");
+    std::fs::remove_file(core.options.network_guard).unwrap();
 }
 
 #[tokio::test]
@@ -1927,7 +2303,7 @@ fn network_input_and_address_boundaries() {
             security: security.into(),
             password: password.into(),
             uuid: String::new(),
-            setup: false,
+            token: String::new(),
         };
         assert_eq!(request.validate(HOTSPOT_UUID).is_ok(), valid);
     }

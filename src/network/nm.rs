@@ -1,5 +1,5 @@
-//! NetworkManager's native system-bus API. Every call is bounded and addressed
-//! to one unique bus owner: a restarted daemon cannot receive an old operation.
+//! NetworkManager's native system-bus API. Mutations target one unique bus owner.
+//! The final protected AP read uses the well-known name and verifies the reply sender.
 
 use super::{NetworkInfo, Profile, Status};
 use crate::options::Options;
@@ -18,6 +18,7 @@ pub const DEVICE: &str = "org.freedesktop.NetworkManager.Device";
 pub const WIFI: &str = "org.freedesktop.NetworkManager.Device.Wireless";
 pub const CONNECTION: &str = "org.freedesktop.NetworkManager.Settings.Connection";
 pub const ACTIVE: &str = "org.freedesktop.NetworkManager.Connection.Active";
+const WIFI_SECURITY: &str = "802-11-wireless-security";
 pub const CANDIDATE_PREFIX: &str = "device-core candidate ";
 pub const COMMITTED_ID: &str = "Device Wi-Fi";
 pub type Dict = HashMap<String, OwnedValue>;
@@ -48,12 +49,13 @@ pub struct Saved {
 
 pub struct Snapshot {
     pub status: Status,
+    pub hotspot: Option<OwnedObjectPath>,
     pub failed: bool,
     pub reason: u32,
 }
 
 impl Nm {
-    pub async fn discover(bus: &Connection, options: &Options) -> Result<Self> {
+    pub async fn current_owner(bus: &Connection) -> Result<String> {
         let dbus = bounded(Proxy::new(
             bus,
             "org.freedesktop.DBus",
@@ -61,12 +63,20 @@ impl Nm {
             "org.freedesktop.DBus",
         ))
         .await?;
-        let owner: String = bounded(dbus.call("GetNameOwner", &(NM,))).await?;
+        bounded(dbus.call("GetNameOwner", &(NM,))).await
+    }
+
+    pub async fn discover(bus: &Connection, options: &Options) -> Result<Self> {
+        let owner = Self::current_owner(bus).await?;
         let manager = bounded(Proxy::new(bus, owner.as_str(), ROOT, NM)).await?;
         let devices: Vec<OwnedObjectPath> = bounded(manager.call("GetDevices", &())).await?;
         for device in devices {
             let proxy = bounded(Proxy::new(bus, owner.as_str(), device.as_str(), DEVICE)).await?;
-            if bounded(proxy.get_property::<u32>("DeviceType")).await? == 2 {
+            if bounded(proxy.get_property::<u32>("DeviceType")).await? == 2
+                && (options.wifi_interface.is_empty()
+                    || bounded(proxy.get_property::<String>("Interface")).await?
+                        == options.wifi_interface)
+            {
                 return Ok(Self {
                     bus: bus.clone(),
                     owner,
@@ -127,6 +137,13 @@ impl Nm {
             if text(&settings, "connection", "type") != "802-11-wireless" {
                 continue;
             }
+            let interface = text(&settings, "connection", "interface-name");
+            if !self.options.wifi_interface.is_empty()
+                && !interface.is_empty()
+                && interface != self.options.wifi_interface
+            {
+                continue;
+            }
             let uuid = text(&settings, "connection", "uuid").to_owned();
             let mode = text(&settings, "802-11-wireless", "mode");
             // Saved enterprise networks remain usable through their native UUID.
@@ -152,15 +169,40 @@ impl Nm {
         Ok(profiles)
     }
 
+    pub async fn active_connection(&self) -> Result<OwnedObjectPath> {
+        self.property(self.device.as_str(), DEVICE, "ActiveConnection")
+            .await
+    }
+
+    pub async fn verified_active_connection(&self) -> Result<OwnedObjectPath> {
+        // Let the bus select the current owner for the read and check who answered.
+        let reply = bounded(self.bus.call_method(
+            Some(NM),
+            self.device.as_str(),
+            Some("org.freedesktop.DBus.Properties"),
+            "Get",
+            &(DEVICE, "ActiveConnection"),
+        ))
+        .await?;
+        if !reply
+            .header()
+            .sender()
+            .is_some_and(|sender| sender.as_str() == self.owner.as_str())
+        {
+            return Err("nm-owner-changed");
+        }
+        let value: OwnedValue = reply.body().deserialize().map_err(|_| "nm-unavailable")?;
+        value.try_into().map_err(|_| "nm-unavailable")
+    }
+
     pub async fn snapshot(&self) -> Result<Snapshot> {
         let state: u32 = self.property(self.device.as_str(), DEVICE, "State").await?;
         let (_, reason): (u32, u32) = self
             .property(self.device.as_str(), DEVICE, "StateReason")
             .await?;
-        let active: OwnedObjectPath = self
-            .property(self.device.as_str(), DEVICE, "ActiveConnection")
-            .await?;
+        let active = self.active_connection().await?;
         let mut status = Status::reconnecting();
+        let mut hotspot = None;
         if active.as_str() != "/" {
             let active_state: u32 = self.property(active.as_str(), ACTIVE, "State").await?;
             status.profile_uuid = self.property(active.as_str(), ACTIVE, "Uuid").await?;
@@ -189,12 +231,36 @@ impl Nm {
                     && status.profile_uuid == self.options.hotspot_uuid
                     && status.address == self.options.hotspot_address
                 {
-                    status.mode = "hotspot".into();
+                    if !self.options.protected_hotspot {
+                        status.mode = "hotspot".into();
+                    } else if self.provisioned_hotspot(&settings_path, &settings).await? {
+                        // The stored profile may have changed without changing the running AP.
+                        let (applied, _): (Settings, u64) = self
+                            .call(
+                                self.device.as_str(),
+                                DEVICE,
+                                "GetAppliedConnection",
+                                &(0u32,),
+                            )
+                            .await?;
+                        let current = self.active_connection().await?;
+                        if current == active
+                            && self.protected_profile(&applied)
+                            && self
+                                .property::<u32>(self.device.as_str(), DEVICE, "State")
+                                .await?
+                                == 100
+                        {
+                            status.mode = "hotspot".into();
+                            hotspot = Some(active);
+                        }
+                    }
                 }
             }
         }
         Ok(Snapshot {
             status,
+            hotspot,
             failed: state == 120,
             reason,
         })
@@ -409,6 +475,35 @@ impl Nm {
         Ok(())
     }
 
+    fn protected_profile(&self, settings: &Settings) -> bool {
+        text(settings, "connection", "uuid") == self.options.hotspot_uuid
+            && text(settings, "connection", "type") == "802-11-wireless"
+            && text(settings, "802-11-wireless", "mode") == "ap"
+            && text(settings, WIFI_SECURITY, "key-mgmt") == "wpa-psk"
+            && settings.get(WIFI_SECURITY).is_some_and(|security| {
+                let proto = security
+                    .get("proto")
+                    .and_then(|value| Vec::<String>::try_from(value.try_clone().ok()?).ok());
+                proto
+                    .as_deref()
+                    .is_some_and(|protocols| protocols == ["rsn"])
+                    && security
+                        .get("psk-flags")
+                        .is_none_or(|flags| u32::try_from(flags).ok() == Some(0))
+            })
+    }
+
+    async fn provisioned_hotspot(
+        &self,
+        path: &OwnedObjectPath,
+        settings: &Settings,
+    ) -> Result<bool> {
+        Ok(self.protected_profile(settings)
+            && !self
+                .property::<bool>(path.as_str(), CONNECTION, "Unsaved")
+                .await?)
+    }
+
     pub async fn hotspot(&self) -> Result<()> {
         let paths: Vec<OwnedObjectPath> = self
             .call(
@@ -426,8 +521,23 @@ impl Nm {
                 if text(&settings, "802-11-wireless", "mode") != "ap" {
                     return Err("invalid-hotspot-profile");
                 }
+                if self.options.protected_hotspot {
+                    if !self.provisioned_hotspot(&path, &settings).await? {
+                        return Err("invalid-hotspot-profile");
+                    }
+                    // GetSettings never returns secrets. Require a system-owned PSK.
+                    let secrets: Settings = self
+                        .call(path.as_str(), CONNECTION, "GetSecrets", &(WIFI_SECURITY,))
+                        .await?;
+                    if text(&secrets, WIFI_SECURITY, "psk").is_empty() {
+                        return Err("missing-hotspot-secret");
+                    }
+                }
                 return self.activate(&path).await;
             }
+        }
+        if self.options.protected_hotspot {
+            return Err("missing-hotspot-profile");
         }
         let machine = std::fs::read_to_string("/etc/machine-id").unwrap_or_default();
         let suffix: String = machine
