@@ -957,6 +957,34 @@ async fn protected_hotspot_requires_a_provisioned_rsn_profile() {
 }
 
 #[tokio::test]
+async fn final_ap_read_rejects_handoff_from_a_live_owner() {
+    let bus = PrivateBus::start();
+    let old_state = Arc::new(Mutex::new(FakeState::new(Outcome::Success)));
+    let new_state = Arc::new(Mutex::new(FakeState::new(Outcome::Success)));
+    let old_owner = fake_nm(&bus, old_state.clone()).await;
+    let conn = bus.connect().await;
+    let nm = Nm::discover(&conn, &test_options()).await.unwrap();
+    assert_eq!(nm.verified_active_connection().await.unwrap(), path(ACT));
+
+    // Transfer the name after the old flow's separate owner check, before its final read.
+    assert_eq!(Nm::current_owner(&conn).await.unwrap(), nm.owner);
+    old_owner.release_name(NM).await.unwrap();
+    let new_owner = fake_nm(&bus, new_state.clone()).await;
+    assert_ne!(old_owner.unique_name(), new_owner.unique_name());
+    // Both owners report the same path, and the old unique address still answers.
+    assert_eq!(nm.active_connection().await.unwrap(), path(ACT));
+    let replacement = Nm::discover(&conn, &test_options()).await.unwrap();
+    assert_eq!(replacement.active_connection().await.unwrap(), path(ACT));
+
+    assert_eq!(nm.verified_active_connection().await, Err("nm-owner-changed"));
+    for state in [old_state, new_state] {
+        let s = state.lock().unwrap();
+        assert_eq!(s.checkpoint_generation, 0);
+        assert_eq!(s.next_profile, 3);
+    }
+}
+
+#[tokio::test]
 async fn protected_connect_rechecks_the_lease_and_ap_before_checkpoint() {
     for stage in [
         "expired",

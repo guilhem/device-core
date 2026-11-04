@@ -940,12 +940,7 @@ impl Controller {
         }
         let before = nm.snapshot().await?;
         let current = if self.options.protected_hotspot {
-            if Nm::current_owner(&self.bus).await? != nm.owner {
-                self.shared.lock().unwrap().observe(Status::unavailable());
-                return Err("nm-owner-changed");
-            }
-            // The same owner can replace the AP while the snapshot or owner check is pending.
-            Some(nm.active_connection().await.inspect_err(|_| {
+            Some(nm.verified_active_connection().await.inspect_err(|_| {
                 self.shared.lock().unwrap().observe(Status::unavailable());
             })?)
         } else {

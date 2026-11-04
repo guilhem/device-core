@@ -1,5 +1,5 @@
-//! NetworkManager's native system-bus API. Every call is bounded and addressed
-//! to one unique bus owner: a restarted daemon cannot receive an old operation.
+//! NetworkManager's native system-bus API. Mutations target one unique bus owner.
+//! The final protected AP read uses the well-known name and verifies the reply sender.
 
 use super::{NetworkInfo, Profile, Status};
 use crate::options::Options;
@@ -172,6 +172,27 @@ impl Nm {
     pub async fn active_connection(&self) -> Result<OwnedObjectPath> {
         self.property(self.device.as_str(), DEVICE, "ActiveConnection")
             .await
+    }
+
+    pub async fn verified_active_connection(&self) -> Result<OwnedObjectPath> {
+        // Let the bus select the current owner for the read and check who answered.
+        let reply = bounded(self.bus.call_method(
+            Some(NM),
+            self.device.as_str(),
+            Some("org.freedesktop.DBus.Properties"),
+            "Get",
+            &(DEVICE, "ActiveConnection"),
+        ))
+        .await?;
+        if !reply
+            .header()
+            .sender()
+            .is_some_and(|sender| sender.as_str() == self.owner.as_str())
+        {
+            return Err("nm-owner-changed");
+        }
+        let value: OwnedValue = reply.body().deserialize().map_err(|_| "nm-unavailable")?;
+        value.try_into().map_err(|_| "nm-unavailable")
     }
 
     pub async fn snapshot(&self) -> Result<Snapshot> {
