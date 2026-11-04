@@ -24,3 +24,10 @@ jobs:
       - run: cargo test --locked
       - run: cargo build --locked
       - run: python3 tools/dbus-contract.py --check
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: wifi-portal/go.mod
+          cache-dependency-path: wifi-portal/go.sum
+      - name: Test the optional Wi-Fi portal
+        working-directory: wifi-portal
+        run: DEVICE_CORE_PORTAL_TEST_DBUS=1 dbus-run-session -- go test -race ./...
