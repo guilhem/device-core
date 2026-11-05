@@ -16,6 +16,15 @@ let
     };
   };
   enabled = evaluate enable;
+  captive = evaluate {
+    imports = [ enable ];
+    services.device-core.captiveDnsAddress = "10.77.0.1";
+  };
+  captiveFile = "NetworkManager/dnsmasq-shared.d/device-core-captive.conf";
+  acceptsCaptiveAddress = address: (builtins.tryEval (evaluate {
+    imports = [ enable ];
+    services.device-core.captiveDnsAddress = address;
+  }).services.device-core.captiveDnsAddress).success;
   extended = evaluate {
     imports = [ enable ];
     services.device-core.dataDir = "/data/device-core";
@@ -47,6 +56,26 @@ in
 assert !(disabled.systemd.services ? device-core);
 assert !(disabled.users.users ? device-core) && !(disabled.users.groups ? device-core);
 assert coreRules disabled == [ ];
+assert !(disabled.environment.etc ? ${captiveFile});
+assert enabled.services.device-core.captiveDnsAddress == null;
+assert !(enabled.environment.etc ? ${captiveFile});
+assert !((evaluate { services.device-core.captiveDnsAddress = "10.77.0.1"; }).environment.etc ? ${captiveFile});
+assert captive.environment.etc.${captiveFile}.text == ''
+  address=/#/10.77.0.1
+  local=/#/
+'';
+assert !captive.networking.networkmanager.enable;
+assert !(captive.environment.etc ? "NetworkManager/dnsmasq.d/device-core-captive.conf");
+assert builtins.all acceptsCaptiveAddress [
+  null "10.77.0.1" "0.0.0.1" "126.255.255.255" "128.0.0.1"
+  "223.255.255.255" "240.0.0.1" "255.255.255.254"
+];
+assert builtins.all (address: !acceptsCaptiveAddress address) [
+  "" "0.0.0.0" "127.0.0.1" "127.2.3.4" "255.255.255.255" "224.0.0.1" "239.255.255.255"
+  "::1" "::ffff:10.77.0.1" "10.77.0.1:80" "10.77.0.1/24" "example.com"
+  "10.077.0.1" "10.77.00.1" "10.77.0.01" "01.2.3.4" "256.0.0.1" "10.77.0" "10.77.0.1.2"
+  "-1.2.3.4" "10.77.0.1\n" " 10.77.0.1" "10.77.0.1\nlocal=/#/" 123 false
+];
 
 assert enabled.users.users.device-core.isSystemUser;
 assert enabled.users.users.device-core.hashedPassword == "!";

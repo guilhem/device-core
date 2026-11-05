@@ -52,7 +52,16 @@ func (p *portal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	local, ok := r.Context().Value(http.LocalAddrContextKey).(*net.TCPAddr)
 	host := p.hotspotAddress.String()
-	if !ok || local == nil || local.String() != netip.AddrPortFrom(p.hotspotAddress, hotspotPort).String() || r.Host != host {
+	if !ok || local == nil || local.String() != netip.AddrPortFrom(p.hotspotAddress, hotspotPort).String() {
+		http.Error(w, "Ce portail est accessible depuis le Wi-Fi de l’appareil.", http.StatusForbidden)
+		return
+	}
+	canonical := r.Host == host && r.URL.Path == "/" && r.URL.RawPath == "" && r.URL.RawQuery == "" && !r.URL.ForceQuery
+	if r.Method == http.MethodGet && !canonical {
+		http.Redirect(w, r, "http://"+host+"/", http.StatusFound)
+		return
+	}
+	if r.Host != host {
 		http.Error(w, "Ce portail est accessible depuis le Wi-Fi de l’appareil.", http.StatusForbidden)
 		return
 	}

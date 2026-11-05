@@ -19,9 +19,20 @@ device-core-wifi-portal --hotspot-address 10.77.0.1
 Use the actual IPv4 address of your hotspot. The option is required and accepts
 a literal address without a port or prefix. The portal listens on that address
 on TCP port 80 and waits for the address to become available. Join the recovery
-hotspot and open `http://10.77.0.1/` in this example. Use the address directly;
-the portal requires an exact Host and, for form submissions, a matching
-`http://` Origin. It does not support reverse proxies or forwarded headers.
+hotspot and open `http://10.77.0.1/` in this example. HTTP GET requests with a
+different Host, path, or query on the actual hotspot socket receive a fixed
+302 redirect to this canonical URL. Discovery does not reserve configuration
+access or set a reservation cookie. Form submissions still require the exact
+canonical Host and path, a matching `http://` Origin, and the existing browser
+reservation. The portal does not trust reverse proxies or forwarded headers.
+
+For offline captive discovery, configure NetworkManager's shared DNS to return
+the hotspot address for hostname queries. The Nix module's optional
+[`services.device-core.captiveDnsAddress`](nixos.md) supplies this configuration
+for all NetworkManager shared connections without changing station DNS. The
+portal does not intercept HTTPS or advertise CAPPORT through DHCP option 114.
+Automatic setup notifications depend on the phone; the direct HTTP URL remains
+available.
 
 Select **Configurer le Wi-Fi**, choose a network, and submit the form. If the
 hotspot disappears while the device connects, the attempt can continue after

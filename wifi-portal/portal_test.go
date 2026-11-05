@@ -107,6 +107,57 @@ func connectForm() url.Values {
 	return url.Values{"action": {"connect"}, "network": {"wpa-psk:ff3c3e"}, "password": {"test-passphrase"}}
 }
 
+func TestCaptiveDiscovery(t *testing.T) {
+	for _, target := range []string{
+		"http://probe.example/",
+		"http://probe.example/generate_204?next=https://foreign.example/",
+		testOrigin + ":80/",
+		testOrigin + "/hotspot-detect.html",
+		testOrigin + "/?next=https://foreign.example/",
+		testOrigin + "/?",
+		testOrigin + "/%2f",
+	} {
+		t.Run(target, func(t *testing.T) {
+			// A discovery request must not need any controller call.
+			p := &portal{hotspotAddress: testHotspot}
+			r := httptest.NewRequest(http.MethodGet, target, nil).WithContext(request("GET", nil, nil).Context())
+			r.Header.Set("X-Forwarded-Host", "foreign.example")
+			w := response(p, r)
+			if w.Code != http.StatusFound || w.Header().Get("Location") != testOrigin+"/" ||
+				len(w.Result().Cookies()) != 0 || p.session != (reservation{}) || w.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("discovery: HTTP %d, location=%q, session=%v", w.Code, w.Header().Get("Location"), p.session)
+			}
+		})
+	}
+
+	n := &testNetwork{state: status{Mode: "hotspot", Address: testHost}}
+	p := &portal{hotspotAddress: testHotspot, network: n}
+	w := response(p, request("GET", nil, nil))
+	if w.Code != http.StatusOK || w.Header().Get("Location") != "" || len(w.Result().Cookies()) != 0 ||
+		n.statusReads != 1 || n.reserved != 0 || !strings.Contains(w.Body.String(), "Configurer le Wi-Fi") {
+		t.Fatalf("canonical page: HTTP %d, status reads=%d reservations=%d", w.Code, n.statusReads, n.reserved)
+	}
+}
+
+func TestCaptiveDiscoveryRequiresHotspotSocket(t *testing.T) {
+	for _, local := range []*net.TCPAddr{
+		nil,
+		{IP: net.ParseIP("192.168.1.10"), Port: hotspotPort},
+		{IP: net.ParseIP(testHost), Port: 8080},
+	} {
+		p := &portal{hotspotAddress: testHotspot}
+		r := httptest.NewRequest(http.MethodGet, "http://probe.example/generate_204", nil)
+		if local != nil {
+			r = r.WithContext(context.WithValue(r.Context(), http.LocalAddrContextKey, local))
+		}
+		r.Header.Set("X-Forwarded-Host", testHost)
+		w := response(p, r)
+		if w.Code != http.StatusForbidden || w.Header().Get("Location") != "" || len(w.Result().Cookies()) != 0 {
+			t.Fatalf("socket %v: HTTP %d, location=%q", local, w.Code, w.Header().Get("Location"))
+		}
+	}
+}
+
 func TestConfiguredHotspotAddress(t *testing.T) {
 	const oldHost = "10.41.0.1"
 	n := &testNetwork{state: status{Mode: "hotspot", Address: testHost}}
@@ -164,6 +215,9 @@ func TestRejectsUnauthorizedWriter(t *testing.T) {
 				&net.TCPAddr{IP: net.ParseIP(testHost), Port: 8080}))
 		}},
 		{"host alias", func(r *http.Request, _ *portal, _ *testNetwork) { r.Host += ":80" }},
+		{"discovery path", func(r *http.Request, _ *portal, _ *testNetwork) { r.URL.Path = "/generate_204" }},
+		{"query", func(r *http.Request, _ *portal, _ *testNetwork) { r.URL.RawQuery = "next=foreign" }},
+		{"empty query", func(r *http.Request, _ *portal, _ *testNetwork) { r.URL.ForceQuery = true }},
 		{"cross origin", func(r *http.Request, _ *portal, _ *testNetwork) { r.Header.Set("Origin", "http://foreign.example") }},
 		{"missing origin", func(r *http.Request, _ *portal, _ *testNetwork) { r.Header.Del("Origin") }},
 		{"duplicate origin", func(r *http.Request, _ *portal, _ *testNetwork) { r.Header.Add("Origin", testOrigin) }},
