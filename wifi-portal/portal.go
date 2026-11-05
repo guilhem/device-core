@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	_ "embed"
@@ -314,7 +315,7 @@ func (p *portal) show(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for _, network := range networks {
-		if len(network.SSID) == 0 || len(network.SSID) > 32 {
+		if len(network.SSID) == 0 || len(network.SSID) > 32 || bytes.Equal(network.SSID, state.SSID) {
 			continue
 		}
 		label := strconv.Quote(string(network.SSID))

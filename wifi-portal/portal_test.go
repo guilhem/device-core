@@ -360,6 +360,21 @@ func TestManualNetworkWithoutScan(t *testing.T) {
 	}
 }
 
+func TestOwnHotspotIsNotAConnectionChoice(t *testing.T) {
+	p, n, cookie := setup(t)
+	n.state.SSID = []byte("Device recovery")
+	n.accessPoints = []accessPoint{
+		{SSID: n.state.SSID, Security: "open"},
+		{SSID: []byte("Home"), Security: "wpa-psk"},
+	}
+	w := response(p, request("GET", nil, cookie))
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "Device recovery") ||
+		!strings.Contains(w.Body.String(), `value="wpa-psk:486f6d65"`) ||
+		!strings.Contains(w.Body.String(), `name="ssid"`) {
+		t.Fatal("own hotspot should be excluded while station choices and manual entry remain")
+	}
+}
+
 func TestManualNetworkValidation(t *testing.T) {
 	valid := url.Values{"action": {"connect"}, "network": {"manual"},
 		"ssid": {strings.Repeat("é", 16)}, "security": {"wpa-psk"}, "password": {"test-passphrase"}}
