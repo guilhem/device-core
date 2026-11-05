@@ -901,6 +901,113 @@ async fn reached_gate(waiting: oneshot::Receiver<()>) {
 }
 
 #[tokio::test]
+async fn reconcile_logs_failures_without_repeating_or_exposing_credentials() {
+    if std::env::var_os("DEVICE_CORE_RECONCILE_LOG_CHECK").is_none() {
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "network::tests::reconcile_logs_failures_without_repeating_or_exposing_credentials",
+                "--nocapture",
+            ])
+            .env("DEVICE_CORE_RECONCILE_LOG_CHECK", "1")
+            .kill_on_drop(true)
+            .output()
+            .await
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{stderr}");
+        assert_eq!(
+            stderr.lines().collect::<Vec<_>>(),
+            [
+                "<4>network reconciliation failed: no-wifi-device",
+                "<4>network reconciliation failed: no-wifi-device",
+                "<4>network reconciliation failed: invalid-hotspot-profile",
+                "<4>network reconciliation failed: nm-timeout",
+                "<4>network reconciliation failed: reconcile-timeout",
+            ]
+        );
+        return;
+    }
+
+    let bus = PrivateBus::start();
+    let state = Arc::new(Mutex::new(FakeState::new(Outcome::Success)));
+    let _nm = fake_nm(&bus, state.clone()).await;
+    let mut options = test_options();
+    options.hotspot_auth = HotspotAuth::OpenProfile;
+    options.wifi_interface = "missing0".into();
+    let (mut core, api) = controller_options(&bus, options).await;
+    core.reconcile().await;
+    core.reconcile().await;
+    assert_eq!(api.status().mode, "unavailable");
+
+    core.options.wifi_interface = "wlan0".into();
+    core.reconcile().await;
+    assert_eq!(api.status().mode, "hotspot");
+    core.options.wifi_interface = "missing0".into();
+    core.reconcile().await;
+
+    core.options.wifi_interface = "wlan0".into();
+    let open = copy_settings(&state.lock().unwrap().profiles[RECOVERY].settings);
+    state.lock().unwrap().protect_recovery();
+    core.grace = Some(Instant::now());
+    core.reconcile().await;
+    assert_eq!(api.status().mode, "unavailable");
+
+    let (entered, waiting) = oneshot::channel();
+    let (resume, released) = oneshot::channel();
+    state.lock().unwrap().state_gate = Some((entered, released));
+    let task = tokio::spawn(async move {
+        core.reconcile().await;
+        core
+    });
+    reached_gate(waiting).await;
+    let mut core = task.await.unwrap();
+    resume.send(()).unwrap();
+    assert_eq!(api.status().mode, "unavailable");
+
+    let mut gates = Vec::new();
+    {
+        let mut s = state.lock().unwrap();
+        s.profiles.get_mut(RECOVERY).unwrap().settings = open;
+        let FakeState {
+            state_gate,
+            address_gate,
+            applied_gate,
+            ..
+        } = &mut *s;
+        for slot in [state_gate, address_gate, applied_gate] {
+            let (entered, waiting) = oneshot::channel();
+            let (resume, released) = oneshot::channel();
+            *slot = Some((entered, released));
+            gates.push((waiting, resume));
+        }
+    }
+    let (entered, waiting) = oneshot::channel();
+    let (resume, released) = oneshot::channel();
+    gates.insert(1, (waiting, resume));
+    let (waiting, resume) = gates.pop().unwrap();
+    let mut next_state_gate = Some((entered, released));
+    let task = tokio::spawn(async move {
+        core.reconcile().await;
+        core
+    });
+    for (i, (waiting, resume)) in gates.into_iter().enumerate() {
+        reached_gate(waiting).await;
+        if i == 0 {
+            state.lock().unwrap().state_gate = next_state_gate.take();
+        }
+        // Each call stays below five seconds; together they exhaust reconciliation.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        resume.send(()).unwrap();
+    }
+    reached_gate(waiting).await;
+    let core = task.await.unwrap();
+    resume.send(()).unwrap();
+    assert_eq!(api.status().mode, "unavailable");
+    std::fs::remove_file(core.options.network_guard).unwrap();
+}
+
+#[tokio::test]
 async fn protected_hotspot_requires_a_provisioned_rsn_profile() {
     let bus = PrivateBus::start();
     let state = Arc::new(Mutex::new(FakeState::new(Outcome::Success)));

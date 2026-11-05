@@ -591,6 +591,7 @@ struct Controller {
     grace: Option<Instant>,
     retry: Instant,
     last_emitted: String,
+    last_reconcile_error: Option<&'static str>,
     options: Options,
     events: Events,
     guard: guard::Guard,
@@ -616,6 +617,7 @@ impl Controller {
             grace: Some(Instant::now() + GRACE),
             retry: Instant::now() + RETRY,
             last_emitted: String::new(),
+            last_reconcile_error: None,
         }
     }
 
@@ -723,7 +725,14 @@ impl Controller {
             }
             return;
         }
-        if !matches!(result, Ok(Ok(()))) {
+        let error = result.unwrap_or(Err("reconcile-timeout")).err();
+        if error != self.last_reconcile_error {
+            if let Some(reason) = error {
+                crate::warn!("network reconciliation failed: {reason}");
+            }
+            self.last_reconcile_error = error;
+        }
+        if error.is_some() {
             self.shared.lock().unwrap().observe(Status::unavailable());
         }
     }
