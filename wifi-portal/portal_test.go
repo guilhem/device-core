@@ -134,8 +134,9 @@ func TestCaptiveDiscovery(t *testing.T) {
 	p := &portal{hotspotAddress: testHotspot, network: n}
 	w := response(p, request("GET", nil, nil))
 	if w.Code != http.StatusOK || w.Header().Get("Location") != "" || len(w.Result().Cookies()) != 0 ||
-		n.statusReads != 1 || n.reserved != 0 || !strings.Contains(w.Body.String(), "Configurer le Wi-Fi") {
-		t.Fatalf("canonical page: HTTP %d, status reads=%d reservations=%d", w.Code, n.statusReads, n.reserved)
+		n.statusReads != 1 || n.reserved != 0 || !strings.Contains(w.Body.String(), "Configurer le Wi-Fi") ||
+		w.Header().Get("Referrer-Policy") != "same-origin" {
+		t.Fatalf("canonical page: HTTP %d, status reads=%d reservations=%d, referrer policy=%q", w.Code, n.statusReads, n.reserved, w.Header().Get("Referrer-Policy"))
 	}
 }
 
@@ -219,6 +220,7 @@ func TestRejectsUnauthorizedWriter(t *testing.T) {
 		{"query", func(r *http.Request, _ *portal, _ *testNetwork) { r.URL.RawQuery = "next=foreign" }},
 		{"empty query", func(r *http.Request, _ *portal, _ *testNetwork) { r.URL.ForceQuery = true }},
 		{"cross origin", func(r *http.Request, _ *portal, _ *testNetwork) { r.Header.Set("Origin", "http://foreign.example") }},
+		{"opaque origin", func(r *http.Request, _ *portal, _ *testNetwork) { r.Header.Set("Origin", "null") }},
 		{"missing origin", func(r *http.Request, _ *portal, _ *testNetwork) { r.Header.Del("Origin") }},
 		{"duplicate origin", func(r *http.Request, _ *portal, _ *testNetwork) { r.Header.Add("Origin", testOrigin) }},
 		{"missing cookie", func(r *http.Request, _ *portal, _ *testNetwork) { r.Header.Del("Cookie") }},

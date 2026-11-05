@@ -25,6 +25,9 @@ different Host, path, or query on the actual hotspot socket receive a fixed
 access or set a reservation cookie. Form submissions still require the exact
 canonical Host and path, a matching `http://` Origin, and the existing browser
 reservation. The portal does not trust reverse proxies or forwarded headers.
+Its `same-origin` referrer policy preserves the browser-generated Origin on
+native form submissions while suppressing cross-origin referrers. Null,
+missing, duplicate and foreign Origins remain rejected.
 
 For offline captive discovery, configure NetworkManager's shared DNS to return
 the hotspot address for hostname queries. The Nix module's optional

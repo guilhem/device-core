@@ -47,7 +47,8 @@ type portal struct {
 func (p *portal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
-	w.Header().Set("Referrer-Policy", "no-referrer")
+	// no-referrer makes browsers send Origin: null on native form POSTs.
+	w.Header().Set("Referrer-Policy", "same-origin")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 
 	local, ok := r.Context().Value(http.LocalAddrContextKey).(*net.TCPAddr)
