@@ -331,10 +331,11 @@ impl Network {
             return Err(fdo::Error::InvalidArgs("invalid-reservation".into()));
         }
         let now = monotonic();
+        let requires_profile = self.options.hotspot_auth.requires_saved_profile();
         let mut s = self.shared.lock().unwrap();
         if s.status.mode != "hotspot"
             || s.active.is_some()
-            || (self.options.protected_hotspot && s.hotspot.is_none())
+            || (requires_profile && s.hotspot.is_none())
         {
             return Err(fdo::Error::Failed("not-hotspot".into()));
         }
@@ -349,7 +350,7 @@ impl Network {
                 created: now,
                 last_press: now,
                 expires: now + LEASE,
-                authorized_until: self.options.protected_hotspot.then_some(now + LEASE),
+                authorized_until: requires_profile.then_some(now + LEASE),
             });
             Ok(token)
         } else if let Some(r) = s
@@ -358,7 +359,7 @@ impl Network {
             .filter(|r| r.token == token && now < r.expires)
         {
             r.expires = now + LEASE;
-            if self.options.protected_hotspot {
+            if requires_profile {
                 r.authorized_until = Some(r.expires);
             }
             Ok(r.token.clone())
@@ -369,7 +370,8 @@ impl Network {
 
     pub fn authorized(&self, token: &str) -> bool {
         let s = self.shared.lock().unwrap();
-        (!self.options.protected_hotspot || s.active.is_none()) && s.authorized(token, monotonic())
+        (!self.options.hotspot_auth.requires_saved_profile() || s.active.is_none())
+            && s.authorized(token, monotonic())
     }
 
     pub fn release(&self, token: &str) -> fdo::Result<()> {
@@ -401,15 +403,15 @@ impl Network {
             token: token.into(),
         };
         request.validate(&self.options.hotspot_uuid)?;
+        let requires_profile = self.options.hotspot_auth.requires_saved_profile();
         let mut s = self.shared.lock().unwrap();
         if s.active.is_some() {
             return Err(fdo::Error::Failed("network-busy".into()));
         }
-        if self.options.protected_hotspot && !s.authorized(token, monotonic()) {
+        if requires_profile && !s.authorized(token, monotonic()) {
             return Err(fdo::Error::AccessDenied("invalid-reservation".into()));
         }
-        if !self.options.protected_hotspot && !token.is_empty() && !s.authorized(token, monotonic())
-        {
+        if !requires_profile && !token.is_empty() && !s.authorized(token, monotonic()) {
             return Err(fdo::Error::AccessDenied(
                 "physical-confirmation-required".into(),
             ));
@@ -430,7 +432,7 @@ impl Network {
                 cancelled: cancelled.clone(),
             })
             .map_err(|_| fdo::Error::Failed("network-busy".into()))?;
-        if !self.options.protected_hotspot && !token.is_empty() {
+        if !requires_profile && !token.is_empty() {
             if let Some(r) = s.reservation.as_mut() {
                 r.authorized_until = None;
             }
@@ -630,7 +632,7 @@ impl Controller {
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         let result = self.attempt(&request, &cancelled).await;
                         let mut s = self.shared.lock().unwrap();
-                        if self.options.protected_hotspot {
+                        if self.options.hotspot_auth.requires_saved_profile() {
                             s.reservation = None;
                         }
                         s.finish_attempt(id, result, monotonic());
@@ -707,7 +709,8 @@ impl Controller {
                             || snapshot.status.mode != s.status.mode
                             || snapshot.status.address != s.status.address
                             || snapshot.status.profile_uuid != s.status.profile_uuid
-                            || (self.options.protected_hotspot && snapshot.status.mode == "hotspot")
+                            || (self.options.hotspot_auth.requires_saved_profile()
+                                && snapshot.status.mode == "hotspot")
                         {
                             s.observe_nm(&nm.owner, snapshot);
                         }
@@ -824,7 +827,7 @@ impl Controller {
 
     fn sim_reconcile(&mut self) -> nm::Result<()> {
         let mut s = self.shared.lock().unwrap();
-        if !self.options.protected_hotspot && s.status.mode == "unavailable" {
+        if !self.options.hotspot_auth.requires_saved_profile() && s.status.mode == "unavailable" {
             let mut status = Status::reconnecting();
             status.mode = "hotspot".into();
             status.profile_uuid = self.options.hotspot_uuid.clone();
@@ -939,7 +942,7 @@ impl Controller {
             );
         }
         let before = nm.snapshot().await?;
-        let current = if self.options.protected_hotspot {
+        let current = if self.options.hotspot_auth.requires_saved_profile() {
             Some(nm.verified_active_connection().await.inspect_err(|_| {
                 self.shared.lock().unwrap().observe(Status::unavailable());
             })?)

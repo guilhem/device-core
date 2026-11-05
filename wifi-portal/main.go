@@ -25,7 +25,7 @@ func parseHotspotAddress(value string) (netip.Addr, error) {
 }
 
 func main() {
-	hotspot := flag.String("hotspot-address", "", "required IPv4 address of the protected Wi-Fi hotspot")
+	hotspot := flag.String("hotspot-address", "", "required IPv4 address of the Wi-Fi recovery hotspot")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		log.Fatal("Unexpected positional arguments")

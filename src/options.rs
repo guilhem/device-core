@@ -1,5 +1,18 @@
 use std::path::PathBuf;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HotspotAuth {
+    Presence,
+    ProtectedProfile,
+    OpenProfile,
+}
+
+impl HotspotAuth {
+    pub(crate) fn requires_saved_profile(self) -> bool {
+        self != Self::Presence
+    }
+}
+
 #[derive(Clone)]
 pub struct Options {
     pub simulate: bool,
@@ -14,7 +27,7 @@ pub struct Options {
     pub hotspot_uuid: String,
     pub hotspot_address: String,
     pub hotspot_prefix: String,
-    pub protected_hotspot: bool,
+    pub hotspot_auth: HotspotAuth,
     pub wifi_interface: String,
     pub lva_unit: String,
     pub lva_url: String,
@@ -70,9 +83,10 @@ impl Options {
             ),
             hotspot_address: env("DEVICE_CORE_HOTSPOT_ADDRESS", "10.41.0.1"),
             hotspot_prefix: env("DEVICE_CORE_HOTSPOT_PREFIX", "Device-"),
-            protected_hotspot: match env("DEVICE_CORE_HOTSPOT_AUTH", "presence").as_str() {
-                "presence" => false,
-                "protected-profile" => true,
+            hotspot_auth: match env("DEVICE_CORE_HOTSPOT_AUTH", "presence").as_str() {
+                "presence" => HotspotAuth::Presence,
+                "protected-profile" => HotspotAuth::ProtectedProfile,
+                "open-profile" => HotspotAuth::OpenProfile,
                 _ => panic!("invalid DEVICE_CORE_HOTSPOT_AUTH"),
             },
             wifi_interface: env("DEVICE_CORE_WIFI_INTERFACE", ""),
