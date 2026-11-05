@@ -30,17 +30,18 @@ and reopen the portal to check the outcome.
 
 ## Appliance prerequisites
 
-- **Recovery hotspot:** Provision a system-owned NetworkManager AP profile on
-  the selected Wi-Fi interface with shared IPv4. For a WPA2 hotspot, use a strong,
-  device-specific PSK, keep the profile readable only by root, and set
-  `DEVICE_CORE_HOTSPOT_AUTH=protected-profile`. For passwordless recovery, omit
-  the Wi-Fi security section and set `DEVICE_CORE_HOTSPOT_AUTH=open-profile`.
+- **Recovery hotspot:** For WPA2, provision a system-owned NetworkManager AP
+  profile with shared IPv4 and a strong, device-specific PSK, keep it readable
+  only by root, and set `DEVICE_CORE_HOTSPOT_AUTH=protected-profile`. For
+  passwordless recovery, set `DEVICE_CORE_HOTSPOT_AUTH=open-profile`.
+  Device-core creates and saves an open AP if the configured UUID is absent.
+  If you provision the open AP yourself, omit the Wi-Fi security section.
   Any nearby client that joins an open hotspot can request setup; HTTP on that
   hotspot does not encrypt the submitted Wi-Fi password. Set
   `DEVICE_CORE_WIFI_INTERFACE` and match `DEVICE_CORE_HOTSPOT_ADDRESS` to the
   portal argument. Use the default profile UUID
   `64657669-6365-4000-8000-000000000001` or set `DEVICE_CORE_HOTSPOT_UUID` to
-  the provisioned UUID. Keep device-core's optional HTTP listener disabled.
+  the desired UUID. Keep device-core's optional HTTP listener disabled.
   See the [Network API](network.md#recovery-hotspot-profiles).
 - **Interface firewall:** Allow inbound TCP port 80 to the configured address
   only on the recovery AP interface. Drop traffic to that address and port on
