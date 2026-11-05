@@ -29,10 +29,15 @@ type testNetwork struct {
 	last                                candidate
 	onAuthorized                        func()
 	onConnect                           func(context.Context) error
+	accessPoints                        []accessPoint
+	networksError                       error
 }
 
 func (n *testNetwork) status(context.Context) (status, error) { n.statusReads++; return n.state, nil }
-func (*testNetwork) networks(context.Context) ([]accessPoint, error) {
+func (n *testNetwork) networks(context.Context) ([]accessPoint, error) {
+	if n.accessPoints != nil || n.networksError != nil {
+		return n.accessPoints, n.networksError
+	}
 	return []accessPoint{{SSID: []byte{0xff, '<', '>'}, Security: "wpa-psk"}}, nil
 }
 func (*testNetwork) profiles(context.Context) ([]profile, error) { return nil, nil }
@@ -319,6 +324,76 @@ func TestFormBoundsAndSSIDEncoding(t *testing.T) {
 	} {
 		if w := response(p, request("POST", form, cookie)); w.Code != http.StatusBadRequest || n.connects != 0 {
 			t.Fatalf("invalid form reached writer: HTTP %d", w.Code)
+		}
+	}
+}
+
+func TestManualNetworkWithoutScan(t *testing.T) {
+	for _, failedScan := range []bool{false, true} {
+		p, n, cookie := setup(t)
+		n.accessPoints = []accessPoint{}
+		if failedScan {
+			n.networksError = errors.New("scan unavailable")
+		}
+		w := response(p, request("GET", nil, cookie))
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `name="ssid"`) ||
+			!strings.Contains(w.Body.String(), `name="security"`) {
+			t.Fatal("manual entry missing without scan results")
+		}
+		form := url.Values{"action": {"connect"}, "network": {"manual"},
+			"ssid": {" Ma Box é "}, "security": {"wpa-psk"}, "password": {"test-passphrase"}}
+		if w := response(p, request("POST", form, nil)); w.Code != http.StatusForbidden || n.connects != 0 {
+			t.Fatal("manual entry bypassed browser reservation")
+		}
+		r := request("POST", form, cookie)
+		r.Header.Set("Origin", "http://foreign.example")
+		if w := response(p, r); w.Code != http.StatusForbidden || n.connects != 0 {
+			t.Fatal("manual entry bypassed origin check")
+		}
+		if w := response(p, request("POST", form, cookie)); w.Code != http.StatusAccepted || n.connects != 1 ||
+			string(n.last.ssid) != " Ma Box é " || n.last.security != "wpa-psk" || n.last.password != "test-passphrase" {
+			t.Fatal("manual network did not reach the existing connect path unchanged")
+		}
+		if w := response(p, request("POST", form, cookie)); w.Code != http.StatusForbidden || n.connects != 1 {
+			t.Fatal("manual connect replayed")
+		}
+	}
+}
+
+func TestManualNetworkValidation(t *testing.T) {
+	valid := url.Values{"action": {"connect"}, "network": {"manual"},
+		"ssid": {strings.Repeat("é", 16)}, "security": {"wpa-psk"}, "password": {"test-passphrase"}}
+	for _, security := range []string{"wpa-psk", "sae", "open"} {
+		form := url.Values{}
+		for key, values := range valid {
+			form.Set(key, values[0])
+		}
+		form.Set("security", security)
+		if security == "open" {
+			form.Set("password", "")
+		}
+		if c, ok := parseCandidate(form); !ok || string(c.ssid) != valid.Get("ssid") || c.security != security {
+			t.Fatalf("supported manual network rejected: %s", security)
+		}
+	}
+	for _, mutate := range []func(url.Values){
+		func(f url.Values) { f.Set("ssid", "") },
+		func(f url.Values) { f.Set("ssid", strings.Repeat("é", 17)) },
+		func(f url.Values) { f.Set("ssid", "\xff") },
+		func(f url.Values) { f.Add("ssid", "other") },
+		func(f url.Values) { f.Add("security", "open") },
+		func(f url.Values) { f.Set("security", "unknown") },
+		func(f url.Values) { f.Set("password", "short") },
+		func(f url.Values) { f.Set("extra", "value") },
+	} {
+		p, n, cookie := setup(t)
+		form := url.Values{}
+		for key, values := range valid {
+			form.Set(key, values[0])
+		}
+		mutate(form)
+		if w := response(p, request("POST", form, cookie)); w.Code != http.StatusBadRequest || n.connects != 0 {
+			t.Fatal("invalid manual network reached controller")
 		}
 	}
 }

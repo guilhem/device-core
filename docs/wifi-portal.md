@@ -38,7 +38,13 @@ Automatic setup notifications depend on the phone; the direct HTTP URL remains
 available.
 
 Select **Configurer le Wi-Fi**, choose a network, and submit the form. If the
-hotspot disappears while the device connects, the attempt can continue after
+network is missing from the list, use **Saisir un réseau Wi-Fi** to enter its
+exact name, security (WPA/WPA2, WPA3 or open) and password. Manual entry also works
+when scan results are unavailable; network names must
+occupy 1–32 UTF-8 bytes. A single radio serving the recovery hotspot may not be
+able to scan nearby networks at the same time.
+
+If the hotspot disappears while the device connects, the attempt can continue after
 the browser disconnects. If the device returns to the hotspot, reconnect to it
 and reopen the portal to check the outcome.
 

@@ -28,9 +28,26 @@
     <button name="action" value="connect">Connecter l’appareil</button>
   </form>
   {{else if .Scan}}
-  <p>Aucun réseau utilisable trouvé. Lancez une recherche, puis actualisez la page.</p>
+  <p>Aucun réseau utilisable trouvé. Vous pouvez saisir son nom ci-dessous ou lancer une recherche.</p>
   {{end}}
   {{if .Scan}}
+  <form method="post" action="/">
+    <fieldset>
+      <legend>Saisir un réseau Wi-Fi</legend>
+      <p>Si votre réseau n’apparaît pas dans la liste, saisissez son nom exact.</p>
+      <input type="hidden" name="network" value="manual">
+      <p><label>Nom du réseau <input name="ssid" required maxlength="32" autocomplete="off" autocapitalize="none" spellcheck="false"></label></p>
+      <p><label>Sécurité
+        <select name="security">
+          <option value="wpa-psk">WPA / WPA2 personnel</option>
+          <option value="sae">WPA3 personnel</option>
+          <option value="open">Réseau ouvert (sans mot de passe)</option>
+        </select>
+      </label></p>
+      <p><label>Mot de passe <input name="password" type="password" maxlength="64" autocomplete="off"></label></p>
+      <button name="action" value="connect">Connecter l’appareil</button>
+    </fieldset>
+  </form>
   <form method="post" action="/">
     <button name="action" value="scan">Rechercher les réseaux</button>
   </form>

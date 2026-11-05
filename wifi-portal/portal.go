@@ -209,13 +209,24 @@ func setCookie(w http.ResponseWriter, value string, maxAge int) {
 var uuidPattern = regexp.MustCompile(`^[a-fA-F0-9]{8}(-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$`)
 
 func parseCandidate(form url.Values) (candidate, bool) {
-	if len(form) != 3 || len(form["action"]) != 1 ||
+	if len(form["action"]) != 1 ||
 		len(form["network"]) != 1 || len(form["password"]) != 1 {
 		return candidate{}, false
 	}
-	kind, value, ok := strings.Cut(form.Get("network"), ":")
 	password := form.Get("password")
-	if !ok || len(password) > 64 || !utf8.ValidString(password) || strings.ContainsRune(password, 0) {
+	if len(password) > 64 || !utf8.ValidString(password) || strings.ContainsRune(password, 0) {
+		return candidate{}, false
+	}
+	if form.Get("network") == "manual" {
+		if len(form) != 5 || len(form["ssid"]) != 1 || len(form["security"]) != 1 {
+			return candidate{}, false
+		}
+		ssid, security := form.Get("ssid"), form.Get("security")
+		return candidate{ssid: []byte(ssid), security: security, password: password},
+			len(ssid) > 0 && len(ssid) <= 32 && utf8.ValidString(ssid) && validPassword(security, password)
+	}
+	kind, value, ok := strings.Cut(form.Get("network"), ":")
+	if len(form) != 3 || !ok {
 		return candidate{}, false
 	}
 	if kind == "saved" {
