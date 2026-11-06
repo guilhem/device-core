@@ -19,6 +19,7 @@ Properties and Changed carry native D-Bus structures, not JSON strings.
 | `authorized(token: &str)` / Authorized | `s` | `b` |
 | `release(token: &str)` / Release | `s` | `()` |
 | `connect(ssid: Vec<u8>, security: &str, password: &str, uuid: &str, token: &str)` / Connect | `ayssss` | attempt ID `t` |
+| D-Bus only `connect_hotspot(ssid: Vec<u8>, security: &str, password: &str, uuid: &str)` / ConnectHotspot | `aysss` | attempt ID `t` |
 | `cancel(attempt_id: u64)` / Cancel | `t` | `()` |
 | `forget(uuid: &str).await` / Forget | `s` | `()` |
 | `acquire_guard(expected_generation: &str)` / AcquireGuard | `s` | already LOCK_SH locked FD `h` |
@@ -68,13 +69,21 @@ are bound to it.
 
 Keep the optional device-core HTTP listener disabled. Grant only the required
 Network D-Bus methods and property reads to the portal's dedicated system user.
-The portal must accept traffic only from the recovery AP interface and bind the
-token returned by `Reserve("")` to the requesting browser. Only one reservation
-is active at a time. `Authorized(token)` needs no physical confirmation in
-either profile mode. Every `Connect` requires that nonempty token; the
-controller rechecks its expiry and the running AP under its network lock before
-consuming it. The accepted attempt continues if the browser disconnects.
-A subsequent attempt requires a new reservation.
+The portal must accept traffic only from the recovery AP interface. Grant it
+`Scan`, `ConnectHotspot` and the `Status`, `Networks` and `Profiles` property reads.
+`ConnectHotspot` is available only in the two profile modes. It synchronously
+reserves a private token and passes it to the existing `Connect` admission path;
+an admission error releases only that token. Accepted work retains the token
+for the controller actor to consume after rechecking its expiry and the running
+AP under the network lock. The portal owns no reservation or session, and the
+accepted attempt continues if the browser disconnects or loses the D-Bus reply.
+Concurrent requests use the existing controller admission lock and active-attempt
+guard. A later manual request is allowed once the controller can admit it.
+
+The existing `Connect`, `Reserve`, `Authorized` and `Release` methods remain
+available to other integrations. `Connect` still requires a nonempty authorized
+token in either profile mode. Presence authorization and the optional HTTP API
+are unchanged; `ConnectHotspot` has no HTTP route and rejects Presence mode.
 
 Read Status, require ready/client, then AcquireGuard(status.generation). The FD
 already holds a shared flock: keep it open during download/install. Never unlock

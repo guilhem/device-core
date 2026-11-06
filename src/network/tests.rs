@@ -1229,15 +1229,186 @@ async fn final_ap_read_rejects_handoff_from_a_live_owner() {
 }
 
 #[tokio::test]
+async fn private_bus_connect_hotspot_serializes_both_profile_modes() {
+    for mode in [HotspotAuth::OpenProfile, HotspotAuth::ProtectedProfile] {
+        let bus = PrivateBus::start();
+        let state = Arc::new(Mutex::new(FakeState::new(Outcome::Success)));
+        if mode == HotspotAuth::ProtectedProfile {
+            state.lock().unwrap().protect_recovery();
+        }
+        let _nm = fake_nm(&bus, state.clone()).await;
+        let mut options = test_options();
+        options.hotspot_auth = mode;
+        let (mut core, api) = controller_options(&bus, options).await;
+        core.reconcile_inner().await.unwrap();
+        let client = bus.connect().await;
+        let proxy = Proxy::new(&client, SERVICE, PATH, INTERFACE).await.unwrap();
+        let args = (vec![0xff, b'x'], "open", "", "");
+        let (first, second) = tokio::join!(
+            proxy.call::<_, _, u64>("ConnectHotspot", &args),
+            proxy.call::<_, _, u64>("ConnectHotspot", &args),
+        );
+        assert_ne!(first.is_ok(), second.is_ok());
+        let id = first.or(second).unwrap();
+        assert_eq!(api.status().phase, "connecting");
+        assert_eq!(api.status().attempt_id, id);
+        let Some(Command::Connect { request, .. }) = core.commands.recv().await else {
+            panic!("no queued attempt");
+        };
+        assert_eq!(request.ssid, args.0);
+        let shared = api.shared.lock().unwrap();
+        assert_eq!(shared.active.as_ref().unwrap().0, id);
+        assert_eq!(shared.reservation.as_ref().unwrap().token, request.token);
+        assert!(core.commands.try_recv().is_err());
+        assert_eq!(state.lock().unwrap().checkpoint_generation, 0);
+        std::fs::remove_file(core.options.network_guard).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn private_bus_connect_hotspot_rejects_presence_without_reserving() {
+    let bus = PrivateBus::start();
+    let state = Arc::new(Mutex::new(FakeState::new(Outcome::Success)));
+    let _nm = fake_nm(&bus, state).await;
+    let (mut core, api) = controller(&bus).await;
+    core.reconcile_inner().await.unwrap();
+    let client = bus.connect().await;
+    let proxy = Proxy::new(&client, SERVICE, PATH, INTERFACE).await.unwrap();
+    assert!(matches!(
+        proxy.call::<_, _, u64>("ConnectHotspot", &(vec![1u8], "open", "", "")).await,
+        Err(zbus::Error::MethodError(name, _, _)) if name == "org.freedesktop.DBus.Error.AccessDenied"
+    ));
+    assert!(api.shared.lock().unwrap().reservation.is_none());
+    assert!(api.shared.lock().unwrap().active.is_none());
+    assert!(core.commands.try_recv().is_err());
+    std::fs::remove_file(core.options.network_guard).unwrap();
+}
+
+#[tokio::test]
+async fn private_bus_connect_hotspot_cleans_only_failed_admission() {
+    for failure in ["input", "queue", "foreign-reservation", "not-hotspot"] {
+        let bus = PrivateBus::start();
+        let state = Arc::new(Mutex::new(FakeState::new(Outcome::Success)));
+        let _nm = fake_nm(&bus, state).await;
+        let mut options = test_options();
+        options.hotspot_auth = HotspotAuth::OpenProfile;
+        let (mut core, api) = controller_options(&bus, options).await;
+        core.reconcile_inner().await.unwrap();
+        let client = bus.connect().await;
+        let proxy = Proxy::new(&client, SERVICE, PATH, INTERFACE).await.unwrap();
+        let foreign = if failure == "foreign-reservation" {
+            Some(api.reserve("").unwrap())
+        } else {
+            None
+        };
+        if failure == "queue" {
+            for _ in 0..8 {
+                api.scan().unwrap();
+            }
+        }
+        if failure == "not-hotspot" {
+            api.shared.lock().unwrap().status.mode = "client".into();
+        }
+        let ssid = if failure == "input" {
+            vec![]
+        } else {
+            vec![1u8]
+        };
+        assert!(proxy
+            .call::<_, _, u64>("ConnectHotspot", &(ssid, "open", "", ""))
+            .await
+            .is_err());
+        {
+            let shared = api.shared.lock().unwrap();
+            assert!(shared.active.is_none());
+            assert_eq!(
+                shared.reservation.as_ref().map(|r| r.token.clone()),
+                foreign
+            );
+        }
+        if let Some(token) = foreign {
+            api.release(&token).unwrap();
+        }
+        while core.commands.try_recv().is_ok() {}
+        api.shared.lock().unwrap().status.mode = "hotspot".into();
+        let _: u64 = proxy
+            .call("ConnectHotspot", &(vec![1u8], "open", "", ""))
+            .await
+            .unwrap();
+        assert!(api.shared.lock().unwrap().reservation.is_some());
+        std::fs::remove_file(core.options.network_guard).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn private_bus_connect_hotspot_keeps_work_after_lost_reply() {
+    for mode in [HotspotAuth::OpenProfile, HotspotAuth::ProtectedProfile] {
+        let bus = PrivateBus::start();
+        let state = Arc::new(Mutex::new(FakeState::new(Outcome::Success)));
+        if mode == HotspotAuth::ProtectedProfile {
+            state.lock().unwrap().protect_recovery();
+        }
+        let _nm = fake_nm(&bus, state.clone()).await;
+        let mut options = test_options();
+        options.hotspot_auth = mode;
+        let (mut core, api) = controller_options(&bus, options).await;
+        core.reconcile_inner().await.unwrap();
+        let client = bus.connect().await;
+        let proxy = Proxy::new(&client, SERVICE, PATH, INTERFACE).await.unwrap();
+        proxy
+            .call_noreply(
+                "ConnectHotspot",
+                &(b"network".to_vec(), "wpa-psk", "testpassword", ""),
+            )
+            .await
+            .unwrap();
+        let Some(Command::Connect {
+            id,
+            request,
+            cancelled,
+        }) = core.commands.recv().await
+        else {
+            panic!("no queued attempt");
+        };
+        drop(proxy);
+        client.close().await.unwrap();
+        assert_eq!(
+            api.shared
+                .lock()
+                .unwrap()
+                .reservation
+                .as_ref()
+                .unwrap()
+                .token,
+            request.token
+        );
+        let result = core.attempt(&request, &cancelled).await;
+        assert_eq!(result, Ok(()));
+        assert!(api.shared.lock().unwrap().reservation.is_none());
+        api.shared
+            .lock()
+            .unwrap()
+            .finish_attempt(id, result, monotonic());
+        assert_eq!(api.status().phase, "succeeded");
+        assert_eq!(state.lock().unwrap().checkpoint_generation, 1);
+        std::fs::remove_file(core.options.network_guard).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn protected_connect_rechecks_the_lease_and_ap_before_checkpoint() {
-    for stage in [
-        "expired",
-        "released",
-        "replacement",
-        "late-replacement",
-        "owner",
-        "rollback",
-        "success",
+    for (stage, direct_setup) in [
+        ("expired", false),
+        ("released", false),
+        ("replacement", false),
+        ("late-replacement", false),
+        ("owner", false),
+        ("rollback", false),
+        ("success", false),
+        ("replacement", true),
+        ("late-replacement", true),
+        ("owner", true),
+        ("success", true),
     ] {
         let bus = PrivateBus::start();
         let outcome = if stage == "rollback" {
@@ -1287,10 +1458,30 @@ async fn protected_connect_rechecks_the_lease_and_ap_before_checkpoint() {
             .call::<_, _, u64>("Connect", &connect("other".into()))
             .await
             .is_err());
-        let _: u64 = proxy
-            .call("Connect", &connect(token.clone()))
-            .await
-            .unwrap();
+        let _: u64 = if direct_setup {
+            proxy.call::<_, _, ()>("Release", &(&token,)).await.unwrap();
+            proxy
+                .call(
+                    "ConnectHotspot",
+                    &(b"network".to_vec(), "wpa-psk", "testpassword", ""),
+                )
+                .await
+                .unwrap()
+        } else {
+            proxy
+                .call("Connect", &connect(token.clone()))
+                .await
+                .unwrap()
+        };
+        let token = api
+            .shared
+            .lock()
+            .unwrap()
+            .reservation
+            .as_ref()
+            .unwrap()
+            .token
+            .clone();
         assert!(proxy
             .call::<_, _, u64>("Connect", &connect(token.clone()))
             .await

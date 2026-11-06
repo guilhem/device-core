@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"sync/atomic"
 	"testing"
 
@@ -25,6 +27,9 @@ func TestDeviceCoreWire(t *testing.T) {
 		t.Fatalf("request bus name: %v, %v", reply, err)
 	}
 	ssid := []byte{0xff, 'x'}
+	var current atomic.Pointer[status]
+	current.Store(&status{Mode: "hotspot", Address: testHost, SSID: ssid, AttemptID: 12, Phase: "failed"})
+	var connects atomic.Int32
 	properties := map[string]dbus.Variant{
 		"Status":   dbus.MakeVariant(status{Mode: "hotspot", Address: testHost, SSID: ssid, AttemptID: 12, Phase: "failed"}),
 		"Networks": dbus.MakeVariant([]accessPoint{{SSID: ssid, Strength: 92, Security: "sae"}}),
@@ -42,34 +47,34 @@ func TestDeviceCoreWire(t *testing.T) {
 		if iface != networkInterface || !exists {
 			return dbus.Variant{}, dbus.NewError("org.freedesktop.DBus.Error.InvalidArgs", nil)
 		}
+		if property == "Status" {
+			value = dbus.MakeVariant(*current.Load())
+		}
 		return value, nil
 	}}, networkPath, "org.freedesktop.DBus.Properties"); err != nil {
 		t.Fatal(err)
 	}
 
-	var releaseReply atomic.Pointer[dbus.Error]
+	var connectReply atomic.Pointer[dbus.Error]
+	var active atomic.Bool
 	methods := map[string]any{
 		"Scan": func() *dbus.Error { return nil },
-		"Reserve": func(token string) (string, *dbus.Error) {
-			if token != "" {
-				return "", dbus.NewError("org.freedesktop.DBus.Error.InvalidArgs", nil)
-			}
-			return controllerToken, nil
-		},
-		"Authorized": func(token string) (bool, *dbus.Error) { return token == controllerToken, nil },
-		"Connect": func(raw []byte, security, password, uuid, token string) (uint64, *dbus.Error) {
-			if !bytes.Equal(raw, ssid) || security != "sae" || password != "test" || uuid != "" || token != controllerToken {
+		"ConnectHotspot": func(raw []byte, security, password, uuid string) (uint64, *dbus.Error) {
+			connects.Add(1)
+			if !bytes.Equal(raw, ssid) || security != "sae" || password != "test" || uuid != "" {
 				return 0, dbus.NewError("org.freedesktop.DBus.Error.InvalidArgs", nil)
 			}
-			return 13, nil
-		},
-		"Release": func(token string) *dbus.Error {
-			if token != controllerToken {
-				return dbus.NewError("org.freedesktop.DBus.Error.InvalidArgs", nil)
+			if !active.CompareAndSwap(false, true) {
+				return 0, dbus.NewError("org.freedesktop.DBus.Error.Failed", []any{"network-busy"})
 			}
-			return releaseReply.Load()
+			state := *current.Load()
+			state.AttemptID++
+			state.Phase = "connecting"
+			current.Store(&state)
+			return state.AttemptID, connectReply.Load()
 		},
 	}
+
 	if err := server.ExportMethodTable(methods, networkPath, networkInterface); err != nil {
 		t.Fatal(err)
 	}
@@ -91,69 +96,42 @@ func TestDeviceCoreWire(t *testing.T) {
 	if got, err := client.profiles(ctx); err != nil || len(got) != 1 || got[0].UUID != "saved" || !bytes.Equal(got[0].SSID, ssid) {
 		t.Fatalf("Profiles: %#v, %v", got, err)
 	}
-	token, err := client.reserve(ctx)
-	if err != nil || token != controllerToken {
-		t.Fatalf("Reserve: %v", err)
-	}
-	if allowed, err := client.authorized(ctx, token); err != nil || !allowed {
-		t.Fatalf("Authorized: %v, %v", allowed, err)
-	}
 	if err := client.scan(ctx); err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
-	if id, err := client.connect(ctx, candidate{ssid: ssid, security: "sae", password: "test"}, token); err != nil || id != 13 {
-		t.Fatalf("Connect: %v, %v", id, err)
-	}
-	if err := client.release(ctx, token); err != nil {
-		t.Fatalf("Release: %v", err)
+	if id, err := client.connect(ctx, candidate{ssid: ssid, security: "sae", password: "test"}); err != nil || id != 13 {
+		t.Fatalf("ConnectHotspot: %v, %v", id, err)
 	}
 
-	for _, tc := range []struct {
-		name, errorName, reason string
-		canRetry                bool
-	}{
-		{"consumed", "Failed", "invalid-reservation", true},
-		{"consumed on pinned controller", "AccessDenied", "invalid-reservation", true},
-		{"bus policy denied release", "AccessDenied", "Rejected send message", false},
-		{"other failure", "Failed", "network-busy", false},
-		{"same text in an unknown error", "InvalidArgs", "invalid-reservation", false},
-		{"reason only contains the code", "Failed", "unexpected invalid-reservation response", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, lostReply := range []bool{false, true} {
+		t.Run("lost reply="+strconv.FormatBool(lostReply), func(t *testing.T) {
+			active.Store(false)
+			connectReply.Store(nil)
+			if lostReply {
+				connectReply.Store(dbus.MakeFailedError(errors.New("lost reply")))
+			}
 			p := &portal{hotspotAddress: testHotspot, network: client}
-			reserve := url.Values{"action": {"reserve"}}
-			release := url.Values{"action": {"release"}}
-			w := response(p, request("POST", reserve, nil))
-			cookies := w.Result().Cookies()
-			if w.Code != http.StatusSeeOther || len(cookies) != 1 {
-				t.Fatalf("initial reservation: HTTP %d", w.Code)
+			form := url.Values{"action": {"connect"}, "network": {"sae:ff78"}, "password": {"test"}}
+			r := request("POST", form, nil)
+			r.Header.Set("Origin", "null")
+			canceled, stop := context.WithCancel(r.Context())
+			stop()
+			before := connects.Load()
+			w := response(p, r.WithContext(canceled))
+			want := http.StatusAccepted
+			if lostReply {
+				want = http.StatusServiceUnavailable
 			}
-			cookie := cookies[0]
-			connect := url.Values{"action": {"connect"}, "network": {"sae:ff78"}, "password": {"test"}}
-			if w := response(p, request("POST", connect, cookie)); w.Code != http.StatusAccepted {
-				t.Fatalf("connect: HTTP %d", w.Code)
+			if w.Code != want || connects.Load() != before+1 || !active.Load() || len(w.Result().Cookies()) != 0 {
+				t.Fatalf("detached direct call: HTTP %d, calls=%d", w.Code, connects.Load()-before)
 			}
-
-			releaseReply.Store(dbus.NewError("org.freedesktop.DBus.Error."+tc.errorName, []any{tc.reason}))
-			w = response(p, request("POST", release, cookie))
-			cookies = w.Result().Cookies()
-			if !tc.canRetry {
-				if w.Code != http.StatusConflict || len(cookies) != 0 {
-					t.Fatalf("unexpected error cleared browser session: HTTP %d", w.Code)
-				}
-				if w := response(p, request("POST", reserve, nil)); w.Code != http.StatusConflict {
-					t.Fatalf("unexpected error allowed a new reservation: HTTP %d", w.Code)
-				}
-				return
+			if w := response(p, request("POST", form, nil)); w.Code != http.StatusServiceUnavailable || connects.Load() != before+2 {
+				t.Fatalf("controller admission bypassed: HTTP %d calls=%d", w.Code, connects.Load()-before)
 			}
-			if w.Code != http.StatusSeeOther || len(cookies) != 1 || cookies[0].MaxAge >= 0 {
-				t.Fatalf("consumed reservation kept browser session: HTTP %d", w.Code)
-			}
-			if w := response(p, request("POST", reserve, nil)); w.Code != http.StatusSeeOther {
-				t.Fatalf("operator could not reserve again immediately: HTTP %d", w.Code)
-			}
-			if w := response(p, request("POST", release, cookie)); w.Code != http.StatusForbidden {
-				t.Fatalf("old cookie could act on the new reservation: HTTP %d", w.Code)
+			active.Store(false)
+			connectReply.Store(nil)
+			if w := response(p, request("POST", form, nil)); w.Code != http.StatusAccepted || connects.Load() != before+3 {
+				t.Fatalf("later manual call blocked: HTTP %d calls=%d", w.Code, connects.Load()-before)
 			}
 		})
 	}

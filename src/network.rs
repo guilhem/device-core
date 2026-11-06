@@ -448,6 +448,24 @@ impl Network {
         Ok(id)
     }
 
+    pub fn connect_hotspot(
+        &self,
+        ssid: Vec<u8>,
+        security: &str,
+        password: &str,
+        uuid: &str,
+    ) -> fdo::Result<u64> {
+        if !self.options.hotspot_auth.requires_saved_profile() {
+            return Err(fdo::Error::AccessDenied("hotspot-profile-required".into()));
+        }
+        let token = self.reserve("")?;
+        let result = self.connect(ssid, security, password, uuid, &token);
+        if result.is_err() {
+            let _ = self.release(&token);
+        }
+        result
+    }
+
     pub fn cancel(&self, attempt_id: u64) -> fdo::Result<()> {
         let s = self.shared.lock().unwrap();
         if let Some((id, cancelled)) = &s.active {

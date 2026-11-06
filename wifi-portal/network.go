@@ -44,10 +44,7 @@ type networkClient interface {
 	networks(context.Context) ([]accessPoint, error)
 	profiles(context.Context) ([]profile, error)
 	scan(context.Context) error
-	reserve(context.Context) (string, error)
-	authorized(context.Context, string) (bool, error)
-	connect(context.Context, candidate, string) (uint64, error)
-	release(context.Context, string) error
+	connect(context.Context, candidate) (uint64, error)
 }
 
 type deviceCore struct{ object dbus.BusObject }
@@ -80,30 +77,8 @@ func (d deviceCore) scan(ctx context.Context) error {
 	return d.object.CallWithContext(ctx, networkInterface+".Scan", 0).Err
 }
 
-func (d deviceCore) reserve(ctx context.Context) (token string, err error) {
-	err = d.object.CallWithContext(ctx, networkInterface+".Reserve", 0, "").Store(&token)
+func (d deviceCore) connect(ctx context.Context, c candidate) (id uint64, err error) {
+	err = d.object.CallWithContext(ctx, networkInterface+".ConnectHotspot", 0, c.ssid,
+		c.security, c.password, c.uuid).Store(&id)
 	return
-}
-
-func (d deviceCore) authorized(ctx context.Context, token string) (ok bool, err error) {
-	err = d.object.CallWithContext(ctx, networkInterface+".Authorized", 0, token).Store(&ok)
-	return
-}
-
-func (d deviceCore) connect(ctx context.Context, c candidate, token string) (id uint64, err error) {
-	err = d.object.CallWithContext(ctx, networkInterface+".Connect", 0, c.ssid,
-		c.security, c.password, c.uuid, token).Store(&id)
-	return
-}
-
-func (d deviceCore) release(ctx context.Context, token string) error {
-	err := d.object.CallWithContext(ctx, networkInterface+".Release", 0, token).Err
-	if reply, ok := err.(dbus.Error); ok && len(reply.Body) == 1 && reply.Body[0] == "invalid-reservation" {
-		switch reply.Name {
-		case "org.freedesktop.DBus.Error.Failed", "org.freedesktop.DBus.Error.AccessDenied":
-			// The controller confirms this token no longer holds a reservation.
-			return nil
-		}
-	}
-	return err
 }

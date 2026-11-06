@@ -11,6 +11,24 @@ in
       type = lib.types.package;
       description = "Package providing bin/device-core.";
     };
+    captiveDnsAddress = lib.mkOption {
+      type = lib.types.nullOr ((lib.types.addCheck lib.types.str (address:
+        let
+          octets = lib.splitString "." address;
+          first = lib.toInt (builtins.head octets);
+        in
+        builtins.length octets == 4
+        && builtins.all (octet:
+          builtins.match "(0|[1-9][0-9]{0,2})" octet != null && lib.toInt octet <= 255
+        ) octets
+        && first != 127 && !(first >= 224 && first <= 239)
+        && address != "0.0.0.0" && address != "255.255.255.255"
+      )) // {
+        description = "concrete unicast IPv4 address without leading-zero octets";
+      });
+      default = null;
+      description = "Captive DNS address for all NetworkManager shared connections; null disables it. Does not affect station DNS or start the Wi-Fi portal.";
+    };
     dataDir = lib.mkOption {
       type = (lib.types.addCheck lib.types.externalPath (path:
         builtins.match "(/[A-Za-z0-9._-]+)+" path != null
@@ -26,6 +44,12 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    environment.etc = lib.mkIf (cfg.captiveDnsAddress != null) {
+      "NetworkManager/dnsmasq-shared.d/device-core-captive.conf".text = ''
+        address=/#/${cfg.captiveDnsAddress}
+        local=/#/
+      '';
+    };
     users.groups.device-core = { };
     users.users.device-core = {
       isSystemUser = true;

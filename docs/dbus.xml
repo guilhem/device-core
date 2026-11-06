@@ -73,6 +73,13 @@
         <arg name="token" type="s" direction="in" />
         <arg type="t" direction="out" />
       </method>
+      <method name="ConnectHotspot">
+        <arg name="ssid" type="ay" direction="in" />
+        <arg name="security" type="s" direction="in" />
+        <arg name="password" type="s" direction="in" />
+        <arg name="uuid" type="s" direction="in" />
+        <arg type="t" direction="out" />
+      </method>
       <method name="Forget">
         <arg name="uuid" type="s" direction="in" />
       </method>
