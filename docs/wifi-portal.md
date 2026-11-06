@@ -50,28 +50,17 @@ and reopen the portal to check the outcome.
 
 ## Controller authorization and retries
 
-The portal keeps a private controller reservation token under its request mutex;
-the token never reaches the browser. Each connection request reads `Status`,
-automatically acquires a token if needed and checks `Authorized` before calling
-`Connect`. If an existing token is no longer authorized, the portal reads
-`Status` again and releases that exact token only after confirming a settled
-hotspot. A confirmed `invalid-reservation` release means the old token is already
-gone. Other release errors preserve the token and stop that request. Connecting,
-unknown or unavailable states never trigger token cleanup. The controller's
-atomic authorization and active-attempt checks remain the final authority.
+Each submission makes one D-Bus `ConnectHotspot` call with a five-second timeout
+detached from browser cancellation. The portal owns no token, mutex or session
+and never retries automatically. A later manual click submits a new request;
+the controller alone admits concurrent attempts and rejects work while busy.
 
-`Connect` has a five-second timeout detached from browser cancellation, so losing
-the phone connection does not cancel dispatch. The portal retains the token after
-dispatch, including a lost reply, because a queued controller attempt may still
-need it. It never automatically retries `Connect`. A later manual click reads
-the current controller state again; a connecting attempt blocks another request,
-while a failed or cancelled attempt can be retried without waiting for a browser
-session. Concurrent submissions receive HTTP 409 while the portal mutex is held.
-Controller calls before dispatch share a separate five-second deadline.
-
-If the reply to `Reserve` is lost, the controller may hold an unknown reservation
-until its five-minute lease expires. The portal cannot release a token it never
-received; a later manual request may need to wait for that expiry.
+`ConnectHotspot` supports `open-profile` and `protected-profile` only. Inside the
+controller, it synchronously reserves a private token and uses the existing
+`Connect` admission path. An admission error releases that exact token. Accepted
+work retains it for the actor's final authorization and AP checks, even if the
+browser disconnects or the D-Bus reply is lost. The existing Presence mode and
+HTTP API retain their authorization requirements.
 
 ## Appliance prerequisites
 
@@ -96,8 +85,8 @@ received; a later manual request may need to wait for that expiry.
 - **Service account and system bus:** Run the portal as a dedicated unprivileged
   user with only the permission needed to bind port 80 (for example,
   `CAP_NET_BIND_SERVICE`). On the system bus, allow that user to call only
-  `org.freedesktop.DBus.Properties.Get` and the `Scan`, `Reserve`, `Authorized`,
-  `Connect`, and `Release` methods of `io.github.guilhem.DeviceCore1.Network`
+  `org.freedesktop.DBus.Properties.Get` and the `Scan` and `ConnectHotspot`
+  methods of `io.github.guilhem.DeviceCore1.Network`
   on destination `io.github.guilhem.DeviceCore1` at
   `/io/github/guilhem/DeviceCore1/Network`. D-Bus policy limits `Get` by path and
   member; the portal uses it for `Status`, `Networks`, and `Profiles`. Leave

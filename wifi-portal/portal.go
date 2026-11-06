@@ -14,7 +14,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -24,8 +23,6 @@ const callTimeout = 5 * time.Second
 type portal struct {
 	hotspotAddress netip.Addr
 	network        networkClient
-	mu             sync.Mutex
-	token          string
 }
 
 func (p *portal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -91,22 +88,8 @@ func (p *portal) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !p.mu.TryLock() {
-		render(w, http.StatusConflict, page{Message: "Une autre demande est en cours. Revenez au portail dans quelques instants."})
-		return
-	}
-	defer p.mu.Unlock()
-	ctx, cancel := context.WithTimeout(r.Context(), callTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), callTimeout)
 	defer cancel()
-	state, err := p.network.status(ctx)
-	if err != nil || !state.hotspot(p.hotspotAddress) {
-		render(w, http.StatusServiceUnavailable, page{Message: "Le point d’accès de l’appareil n’est pas disponible."})
-		return
-	}
-	if !state.settled() {
-		render(w, http.StatusConflict, page{Message: connectionMessage})
-		return
-	}
 
 	if action == "scan" {
 		if err := p.network.scan(ctx); err != nil {
@@ -116,44 +99,7 @@ func (p *portal) submit(w http.ResponseWriter, r *http.Request) {
 		render(w, http.StatusOK, page{Message: "Recherche lancée. Revenez au portail dans quelques secondes pour afficher les résultats."})
 		return
 	}
-	if p.token != "" {
-		allowed, err := p.network.authorized(ctx, p.token)
-		if err != nil {
-			render(w, http.StatusServiceUnavailable, page{Message: "Le service Wi-Fi de l’appareil ne répond pas."})
-			return
-		}
-		if !allowed {
-			// Authorized can become false while an admitted attempt still needs its token.
-			state, err = p.network.status(ctx)
-			if err != nil || !state.hotspot(p.hotspotAddress) || !state.settled() {
-				render(w, http.StatusConflict, page{Message: connectionMessage})
-				return
-			}
-			if err := p.network.release(ctx, p.token); err != nil {
-				render(w, http.StatusConflict, page{Message: "La configuration n’est pas disponible pour le moment. Réessayez dans quelques instants."})
-				return
-			}
-			p.token = ""
-		}
-	}
-	if p.token == "" {
-		token, err := p.network.reserve(ctx)
-		if err != nil || token == "" || len(token) > 64 {
-			render(w, http.StatusConflict, page{Message: "La configuration n’est pas disponible pour le moment. Réessayez dans quelques minutes."})
-			return
-		}
-		p.token = token
-	}
-	allowed, err := p.network.authorized(ctx, p.token)
-	if err != nil || !allowed {
-		render(w, http.StatusForbidden, page{Message: "La configuration n’est pas encore autorisée par l’appareil. Réessayez dans quelques instants."})
-		return
-	}
-
-	// Keep the token after dispatch: a queued attempt may still need it after a lost reply.
-	connectCtx, stop := context.WithTimeout(context.WithoutCancel(r.Context()), callTimeout)
-	defer stop()
-	id, err := p.network.connect(connectCtx, c, p.token)
+	id, err := p.network.connect(ctx, c)
 	if err != nil || id == 0 {
 		render(w, http.StatusServiceUnavailable, page{Message: "L’appareil n’a pas confirmé la demande. Si le Wi-Fi de l’appareil disparaît, patientez avant de réessayer."})
 		return
@@ -163,10 +109,6 @@ func (p *portal) submit(w http.ResponseWriter, r *http.Request) {
 
 func (s status) hotspot(addr netip.Addr) bool {
 	return s.Mode == "hotspot" && s.Address == addr.String()
-}
-
-func (s status) settled() bool {
-	return s.Phase == "idle" || s.Phase == "failed" || s.Phase == "cancelled" || s.Phase == "succeeded"
 }
 
 var uuidPattern = regexp.MustCompile(`^[a-fA-F0-9]{8}(-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$`)

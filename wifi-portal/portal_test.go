@@ -8,41 +8,36 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
-	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 const (
-	controllerToken = "private-controller-reservation"
-	testHost        = "10.77.0.1"
-	testOrigin      = "http://" + testHost
+	testHost   = "10.77.0.1"
+	testOrigin = "http://" + testHost
 )
 
 var testHotspot = netip.MustParseAddr(testHost)
 
 type testNetwork struct {
-	statusReads                           int
-	state                                 status
-	statusError                           error
-	allowed                               bool
-	reserved, scans, released, connects   int
-	last                                  candidate
-	onAuthorized                          func()
-	authorizedError                       error
-	onReserve                             func()
-	reserveError, releaseError, scanError error
-	releasedToken                         string
-	savedProfiles                         []profile
-	onConnect                             func(context.Context) error
-	accessPoints                          []accessPoint
-	networksError                         error
+	mu              sync.Mutex
+	statusReads     int
+	state           status
+	scans, connects int
+	last            candidate
+	scanError       error
+	savedProfiles   []profile
+	onConnect       func(context.Context) error
+	accessPoints    []accessPoint
+	networksError   error
 }
 
 func (n *testNetwork) status(context.Context) (status, error) {
 	n.statusReads++
-	return n.state, n.statusError
+	return n.state, nil
 }
 func (n *testNetwork) networks(context.Context) ([]accessPoint, error) {
 	if n.accessPoints != nil || n.networksError != nil {
@@ -52,37 +47,15 @@ func (n *testNetwork) networks(context.Context) ([]accessPoint, error) {
 }
 func (n *testNetwork) profiles(context.Context) ([]profile, error) { return n.savedProfiles, nil }
 func (n *testNetwork) scan(context.Context) error                  { n.scans++; return n.scanError }
-func (n *testNetwork) reserve(context.Context) (string, error) {
-	n.reserved++
-	if n.onReserve != nil {
-		n.onReserve()
-	}
-	return controllerToken, n.reserveError
-}
-func (n *testNetwork) authorized(_ context.Context, token string) (bool, error) {
-	if n.onAuthorized != nil {
-		n.onAuthorized()
-	}
-	return token == controllerToken && n.allowed, n.authorizedError
-}
-func (n *testNetwork) connect(ctx context.Context, c candidate, token string) (uint64, error) {
+func (n *testNetwork) connect(ctx context.Context, c candidate) (uint64, error) {
+	n.mu.Lock()
 	n.connects++
 	n.last = c
-	if token != controllerToken {
-		return 0, errors.New("wrong token")
-	}
+	n.mu.Unlock()
 	if n.onConnect != nil {
 		return 1, n.onConnect(ctx)
 	}
 	return 1, nil
-}
-func (n *testNetwork) release(_ context.Context, token string) error {
-	if token != controllerToken {
-		return errors.New("wrong token")
-	}
-	n.released++
-	n.releasedToken = token
-	return n.releaseError
 }
 
 func request(method string, form url.Values, cookie *http.Cookie) *http.Request {
@@ -106,7 +79,7 @@ func response(p *portal, r *http.Request) *httptest.ResponseRecorder {
 }
 
 func setup() (*portal, *testNetwork) {
-	n := &testNetwork{state: status{Mode: "hotspot", Address: testHost, Phase: "idle"}, allowed: true}
+	n := &testNetwork{state: status{Mode: "hotspot", Address: testHost, Phase: "idle"}}
 	return &portal{hotspotAddress: testHotspot, network: n}, n
 }
 
@@ -133,10 +106,10 @@ func TestBrowserMetadataDoesNotBlockSetup(t *testing.T) {
 			r := request("POST", connectForm(), nil)
 			tc.change(r)
 			w := response(p, r)
-			if w.Code != http.StatusAccepted || n.connects != 1 || n.reserved != 1 || n.released != 0 ||
-				len(w.Result().Cookies()) != 0 || strings.Contains(w.Body.String(), controllerToken) ||
+			if w.Code != http.StatusAccepted || n.connects != 1 || n.statusReads != 0 ||
+				len(w.Result().Cookies()) != 0 ||
 				w.Header().Get("Content-Security-Policy") != "" {
-				t.Fatalf("direct connect: HTTP %d, connect=%d reserve=%d release=%d", w.Code, n.connects, n.reserved, n.released)
+				t.Fatalf("direct connect: HTTP %d, connect=%d status=%d", w.Code, n.connects, n.statusReads)
 			}
 		})
 	}
@@ -159,8 +132,8 @@ func TestCaptiveDiscovery(t *testing.T) {
 			r.Header.Set("X-Forwarded-Host", "foreign.example")
 			w := response(p, r)
 			if w.Code != http.StatusFound || w.Header().Get("Location") != testOrigin+"/" ||
-				len(w.Result().Cookies()) != 0 || p.token != "" || w.Header().Get("Cache-Control") != "no-store" {
-				t.Fatalf("discovery: HTTP %d, location=%q, session=%v", w.Code, w.Header().Get("Location"), p.token)
+				len(w.Result().Cookies()) != 0 || w.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("discovery: HTTP %d, location=%q", w.Code, w.Header().Get("Location"))
 			}
 		})
 	}
@@ -169,9 +142,9 @@ func TestCaptiveDiscovery(t *testing.T) {
 	p := &portal{hotspotAddress: testHotspot, network: n}
 	w := response(p, request("GET", nil, nil))
 	if w.Code != http.StatusOK || w.Header().Get("Location") != "" || len(w.Result().Cookies()) != 0 ||
-		n.statusReads != 1 || n.reserved != 0 || !strings.Contains(w.Body.String(), `name="ssid"`) ||
+		n.statusReads != 1 || !strings.Contains(w.Body.String(), `name="ssid"`) ||
 		w.Header().Get("Referrer-Policy") != "same-origin" {
-		t.Fatalf("canonical page: HTTP %d, status reads=%d reservations=%d, referrer policy=%q", w.Code, n.statusReads, n.reserved, w.Header().Get("Referrer-Policy"))
+		t.Fatalf("canonical page: HTTP %d, status reads=%d, referrer policy=%q", w.Code, n.statusReads, w.Header().Get("Referrer-Policy"))
 	}
 }
 
@@ -199,16 +172,11 @@ func TestConfiguredHotspotAddress(t *testing.T) {
 	r := request("POST", connectForm(), nil)
 	r = r.WithContext(context.WithValue(r.Context(), http.LocalAddrContextKey,
 		&net.TCPAddr{IP: net.ParseIP("10.41.0.1"), Port: hotspotPort}))
-	if w := response(p, r); w.Code != http.StatusForbidden || n.statusReads != 0 || n.reserved != 0 {
-		t.Fatalf("old socket: HTTP %d; status reads=%d reservations=%d", w.Code, n.statusReads, n.reserved)
+	if w := response(p, r); w.Code != http.StatusForbidden || n.connects != 0 {
+		t.Fatalf("old socket: HTTP %d; connects=%d", w.Code, n.connects)
 	}
-	n.state.Address = "10.41.0.1"
-	if w := response(p, request("POST", connectForm(), nil)); w.Code != http.StatusServiceUnavailable || n.reserved != 0 {
-		t.Fatalf("mismatched controller address: HTTP %d; reservations=%d", w.Code, n.reserved)
-	}
-	n.state.Address = testHost
-	if w := response(p, request("POST", connectForm(), nil)); w.Code != http.StatusAccepted || n.reserved != 1 {
-		t.Fatalf("matching addresses: HTTP %d; reservations=%d", w.Code, n.reserved)
+	if w := response(p, request("POST", connectForm(), nil)); w.Code != http.StatusAccepted || n.connects != 1 || n.statusReads != 0 {
+		t.Fatalf("configured socket: HTTP %d; connects=%d status=%d", w.Code, n.connects, n.statusReads)
 	}
 }
 
@@ -229,20 +197,14 @@ func TestRejectsUnauthorizedWriter(t *testing.T) {
 		{"discovery path", func(r *http.Request, _ *portal, _ *testNetwork) { r.URL.Path = "/generate_204" }},
 		{"query", func(r *http.Request, _ *portal, _ *testNetwork) { r.URL.RawQuery = "next=foreign" }},
 		{"empty query", func(r *http.Request, _ *portal, _ *testNetwork) { r.URL.ForceQuery = true }},
-		{"controller revoked", func(_ *http.Request, _ *portal, n *testNetwork) { n.allowed = false }},
-		{"controller unavailable", func(_ *http.Request, _ *portal, n *testNetwork) { n.statusError = errors.New("offline") }},
-		{"unknown phase", func(_ *http.Request, _ *portal, n *testNetwork) { n.state.Phase = "unknown" }},
-
-		{"hotspot gone", func(_ *http.Request, _ *portal, n *testNetwork) { n.state.Mode = "client" }},
-		{"hotspot moved", func(_ *http.Request, _ *portal, n *testNetwork) { n.state.Address = "10.42.0.1" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, n := setup()
 			r := request("POST", connectForm(), nil)
 			tc.change(r, p, n)
 			w := response(p, r)
-			if w.Code < 400 || n.connects != 0 || n.scans != 0 || n.released != 0 {
-				t.Fatalf("HTTP %d; connect=%d scan=%d release=%d", w.Code, n.connects, n.scans, n.released)
+			if w.Code < 400 || n.connects != 0 || n.scans != 0 {
+				t.Fatalf("HTTP %d; connect=%d scan=%d", w.Code, n.connects, n.scans)
 			}
 		})
 	}
@@ -254,7 +216,7 @@ func TestConnectSurvivesDisconnect(t *testing.T) {
 		r := request("POST", connectForm(), nil)
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
-		n.onAuthorized = cancel
+		cancel()
 		n.onConnect = func(ctx context.Context) error {
 			if ctx.Err() != nil {
 				t.Fatal("controller submission cancelled when phone disconnected")
@@ -276,113 +238,6 @@ func TestConnectSurvivesDisconnect(t *testing.T) {
 			strings.Contains(w.Body.String(), "test-passphrase") {
 			t.Fatalf("unexpected result: HTTP %d, %d calls", w.Code, n.connects)
 		}
-		if n.released != 0 || p.token != controllerToken {
-			t.Fatal("dispatch released the token")
-		}
-	}
-}
-
-func TestControllerReservationLifecycle(t *testing.T) {
-	for _, phase := range []string{"idle", "failed", "cancelled"} {
-		t.Run("replace invalid token/"+phase, func(t *testing.T) {
-			p, n := setup()
-			p.token = controllerToken
-			n.allowed = false
-			n.state.Phase = phase
-			n.onReserve = func() { n.allowed = true }
-			w := response(p, request("POST", connectForm(), nil))
-			if w.Code != http.StatusAccepted || n.connects != 1 || n.reserved != 1 || n.released != 1 || n.releasedToken != controllerToken {
-				t.Fatalf("replacement: HTTP %d, connect=%d reserve=%d release=%d token=%q", w.Code, n.connects, n.reserved, n.released, n.releasedToken)
-			}
-		})
-	}
-	for _, failure := range []string{"authorization", "release", "reserve", "scan"} {
-		t.Run(failure+" error", func(t *testing.T) {
-			p, n := setup()
-			p.token = controllerToken
-			n.allowed = false
-			err := errors.New("private failure with test-passphrase")
-			form := connectForm()
-			switch failure {
-			case "authorization":
-				n.authorizedError = err
-			case "release":
-				n.releaseError = err
-			case "reserve":
-				n.reserveError = err
-			case "scan":
-				n.scanError = err
-				form = url.Values{"action": {"scan"}}
-			}
-			w := response(p, request("POST", form, nil))
-			if w.Code < 400 || n.connects != 0 || strings.Contains(w.Body.String(), "test-passphrase") {
-				t.Fatalf("failed operation reached connect or leaked its error: HTTP %d", w.Code)
-			}
-			if (failure == "authorization" || failure == "release") && (p.token != controllerToken || n.reserved != 0) {
-				t.Fatal("uncertain authorization/release discarded the token or reserved again")
-			}
-		})
-	}
-}
-
-func TestPendingConnect(t *testing.T) {
-	for _, ambiguous := range []bool{false, true} {
-		t.Run("lost reply="+strconv.FormatBool(ambiguous), func(t *testing.T) {
-			p, n := setup()
-			n.state.AttemptID, n.state.Phase = 12, "failed"
-			n.onReserve = func() { n.allowed = true }
-			n.onConnect = func(context.Context) error {
-				n.state.AttemptID++
-				n.state.Phase, n.allowed = "connecting", false
-				if ambiguous {
-					return errors.New("reply lost")
-				}
-				return nil
-			}
-			w := response(p, request("POST", connectForm(), nil))
-			if (!ambiguous && w.Code != http.StatusAccepted) || (ambiguous && w.Code != http.StatusServiceUnavailable) || n.released != 0 {
-				t.Fatalf("initial dispatch: HTTP %d, releases=%d", w.Code, n.released)
-			}
-			for _, phase := range []string{"connecting", "unknown"} {
-				n.state.Phase = phase
-				if w := response(p, request("POST", connectForm(), nil)); w.Code != http.StatusConflict || n.connects != 1 || n.released != 0 || n.reserved != 1 {
-					t.Fatalf("pending %s: HTTP %d, connect=%d release=%d reserve=%d", phase, w.Code, n.connects, n.released, n.reserved)
-				}
-			}
-			n.statusError = errors.New("offline")
-			if w := response(p, request("POST", connectForm(), nil)); w.Code != http.StatusServiceUnavailable || n.released != 0 {
-				t.Fatalf("unknown controller state: HTTP %d, releases=%d", w.Code, n.released)
-			}
-			n.statusError = nil
-			n.state.AttemptID, n.state.Phase = 13, "cancelled"
-			w = response(p, request("POST", connectForm(), nil))
-			if n.connects != 2 || n.reserved != 2 || n.released != 1 || n.releasedToken != controllerToken {
-				t.Fatalf("manual retry after confirmed cancellation: HTTP %d, connect=%d reserve=%d release=%d", w.Code, n.connects, n.reserved, n.released)
-			}
-		})
-	}
-}
-
-func TestStatusRecheckedBeforeRelease(t *testing.T) {
-	for _, phase := range []string{"connecting", "unknown", "unavailable", "moved"} {
-		t.Run(phase, func(t *testing.T) {
-			p, n := setup()
-			p.token = controllerToken
-			n.allowed = false
-			n.onAuthorized = func() {
-				n.state.Phase = phase
-				if phase == "unavailable" {
-					n.statusError = errors.New("offline")
-				}
-				if phase == "moved" {
-					n.state.Phase, n.state.Address = "idle", "10.42.0.1"
-				}
-			}
-			w := response(p, request("POST", connectForm(), nil))
-			if w.Code != http.StatusConflict || n.released != 0 || n.reserved != 0 || n.connects != 0 || p.token != controllerToken {
-				t.Fatalf("state changed during authorization: HTTP %d release=%d reserve=%d connect=%d", w.Code, n.released, n.reserved, n.connects)
-			}
-		})
 	}
 }
 
@@ -390,38 +245,12 @@ func TestConnectTimeoutAllowsLaterManualRequest(t *testing.T) {
 	p, n := setup()
 	n.onConnect = func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }
 	w := response(p, request("POST", connectForm(), nil))
-	if w.Code != http.StatusServiceUnavailable || n.released != 0 || n.connects != 1 || p.token != controllerToken {
-		t.Fatalf("timeout: HTTP %d release=%d connect=%d", w.Code, n.released, n.connects)
+	if w.Code != http.StatusServiceUnavailable || n.connects != 1 {
+		t.Fatalf("timeout: HTTP %d connect=%d", w.Code, n.connects)
 	}
 	n.onConnect = nil
 	if w := response(p, request("POST", connectForm(), nil)); w.Code != http.StatusAccepted || n.connects != 2 {
 		t.Fatalf("later manual request blocked: HTTP %d connect=%d", w.Code, n.connects)
-	}
-}
-
-func TestManualRetryAfterControllerRejectionOrRestart(t *testing.T) {
-	for _, reason := range []string{"authorization expired", "profile changed", "controller restart"} {
-		t.Run(reason, func(t *testing.T) {
-			p, n := setup()
-			n.state.AttemptID, n.state.Phase = 12, "failed"
-			n.onConnect = func(context.Context) error { return errors.New(reason) }
-			if w := response(p, request("POST", connectForm(), nil)); w.Code != http.StatusServiceUnavailable || n.connects != 1 || n.released != 0 {
-				t.Fatalf("rejected dispatch: HTTP %d connect=%d release=%d", w.Code, n.connects, n.released)
-			}
-			n.onConnect = nil
-			wantReserves, wantReleases := 1, 0
-			if reason != "profile changed" {
-				n.allowed = false
-				n.onReserve = func() { n.allowed = true }
-				wantReserves, wantReleases = 2, 1
-			}
-			if reason == "controller restart" {
-				n.state.AttemptID, n.state.Phase = 0, "idle"
-			}
-			if w := response(p, request("POST", connectForm(), nil)); w.Code != http.StatusAccepted || n.connects != 2 || n.reserved != wantReserves || n.released != wantReleases {
-				t.Fatalf("manual retry blocked: HTTP %d connect=%d reserve=%d release=%d", w.Code, n.connects, n.reserved, n.released)
-			}
-		})
 	}
 }
 
@@ -431,17 +260,17 @@ func TestDirectSetup(t *testing.T) {
 	n.savedProfiles = []profile{{UUID: uuid, SSID: []byte("Saved Wi-Fi")}}
 	w := response(p, request("GET", nil, nil))
 	body := w.Body.String()
-	if w.Code != http.StatusOK || n.reserved != 0 || n.released != 0 ||
+	if w.Code != http.StatusOK ||
 		!strings.Contains(body, "saved:"+uuid) || !strings.Contains(body, `value="wpa-psk:ff3c3e"`) ||
 		!strings.Contains(body, `name="ssid"`) || !strings.Contains(body, `value="scan"`) ||
 		strings.Contains(body, `value="reserve"`) || strings.Contains(body, `value="release"`) || len(w.Result().Cookies()) != 0 {
-		t.Fatalf("initial GET did not expose direct setup: HTTP %d, reserves=%d", w.Code, n.reserved)
+		t.Fatalf("initial GET did not expose direct setup: HTTP %d", w.Code)
 	}
-	if w := response(p, request("POST", url.Values{"action": {"scan"}}, nil)); w.Code != http.StatusOK || n.scans != 1 || n.reserved != 0 {
-		t.Fatalf("scan without reservation: HTTP %d, scans=%d reserves=%d", w.Code, n.scans, n.reserved)
+	if w := response(p, request("POST", url.Values{"action": {"scan"}}, nil)); w.Code != http.StatusOK || n.scans != 1 {
+		t.Fatalf("scan: HTTP %d, scans=%d", w.Code, n.scans)
 	}
 	for _, obsolete := range []string{"reserve", "release"} {
-		if w := response(p, request("POST", url.Values{"action": {obsolete}}, nil)); w.Code != http.StatusBadRequest || n.reserved != 0 || n.released != 0 {
+		if w := response(p, request("POST", url.Values{"action": {obsolete}}, nil)); w.Code != http.StatusBadRequest {
 			t.Fatalf("obsolete browser action %s: HTTP %d", obsolete, w.Code)
 		}
 	}
@@ -456,7 +285,7 @@ func TestFormBoundsAndSSIDEncoding(t *testing.T) {
 	w := response(p, request("GET", nil, nil))
 	body := w.Body.String()
 	if w.Code != http.StatusOK || !strings.Contains(body, `value="wpa-psk:ff3c3e"`) ||
-		!strings.Contains(body, `\xff&lt;&gt;`) || strings.Contains(body, controllerToken) {
+		!strings.Contains(body, `\xff&lt;&gt;`) {
 		t.Fatalf("SSID lost bytes or leaked into markup: %s", body)
 	}
 	for _, form := range []url.Values{
@@ -548,12 +377,16 @@ func TestManualNetworkValidation(t *testing.T) {
 	}
 }
 
-func TestConcurrentConnectDoesNotReachControllerTwice(t *testing.T) {
+func TestConcurrentConnectDelegatesAdmissionToController(t *testing.T) {
 	p, n := setup()
+	var busy atomic.Bool
 	entered := make(chan struct{})
 	unblock := make(chan struct{})
 	first := make(chan int, 1)
 	n.onConnect = func(ctx context.Context) error {
+		if !busy.CompareAndSwap(false, true) {
+			return errors.New("network-busy")
+		}
 		close(entered)
 		select {
 		case <-unblock:
@@ -566,11 +399,31 @@ func TestConcurrentConnectDoesNotReachControllerTwice(t *testing.T) {
 	select {
 	case <-entered:
 	case <-time.After(callTimeout):
-		t.Fatal("first request did not reach the controller")
+		t.Fatal("first request did not reach controller")
 	}
 	second := response(p, request("POST", connectForm(), nil))
 	close(unblock)
-	if initial := <-first; initial != http.StatusAccepted || second.Code != http.StatusConflict || n.connects != 1 {
-		t.Fatalf("first HTTP %d, second HTTP %d, %d controller submissions", initial, second.Code, n.connects)
+	if initial := <-first; initial != http.StatusAccepted || second.Code != http.StatusServiceUnavailable || n.connects != 2 || n.statusReads != 0 {
+		t.Fatalf("first HTTP %d, second HTTP %d, controller calls=%d", initial, second.Code, n.connects)
+	}
+}
+
+func TestControllerErrorsAllowLaterManualRequest(t *testing.T) {
+	p, n := setup()
+	for _, action := range []string{"connect", "scan"} {
+		n.onConnect = func(context.Context) error { return errors.New("private test-passphrase") }
+		n.scanError = errors.New("private test-passphrase")
+		form := connectForm()
+		if action == "scan" {
+			form = url.Values{"action": {"scan"}}
+		}
+		w := response(p, request("POST", form, nil))
+		if w.Code < 400 || strings.Contains(w.Body.String(), "test-passphrase") {
+			t.Fatalf("error leaked or ignored: HTTP %d", w.Code)
+		}
+		n.onConnect, n.scanError = nil, nil
+		if w := response(p, request("POST", form, nil)); w.Code >= 400 {
+			t.Fatalf("manual retry blocked: HTTP %d", w.Code)
+		}
 	}
 }
