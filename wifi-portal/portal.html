@@ -9,12 +9,7 @@
 <main>
   <h1>Configuration Wi-Fi</h1>
   {{if .Message}}<p role="status">{{.Message}}</p>{{end}}
-  {{if .Start}}
   <p>Choisissez le réseau Wi-Fi que l’appareil doit utiliser.</p>
-  <form method="post" action="/">
-    <button name="action" value="reserve">Configurer le Wi-Fi</button>
-  </form>
-  {{end}}
   {{if .Options}}
   <form method="post" action="/">
     <p><label>Réseau
@@ -52,12 +47,7 @@
     <button name="action" value="scan">Rechercher les réseaux</button>
   </form>
   {{end}}
-  {{if .End}}
-  <form method="post" action="/">
-    <button name="action" value="release">Terminer cette session de configuration</button>
-  </form>
-  {{end}}
-  {{if not .Start}}<p><a href="/">Actualiser le portail</a></p>{{end}}
+  <p><a href="/">Actualiser le portail</a></p>
 </main>
 </body>
 </html>

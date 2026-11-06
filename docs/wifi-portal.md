@@ -21,13 +21,13 @@ a literal address without a port or prefix. The portal listens on that address
 on TCP port 80 and waits for the address to become available. Join the recovery
 hotspot and open `http://10.77.0.1/` in this example. HTTP GET requests with a
 different Host, path, or query on the actual hotspot socket receive a fixed
-302 redirect to this canonical URL. Discovery does not reserve configuration
-access or set a reservation cookie. Form submissions still require the exact
-canonical Host and path, a matching `http://` Origin, and the existing browser
-reservation. The portal does not trust reverse proxies or forwarded headers.
-Its `same-origin` referrer policy preserves the browser-generated Origin on
-native form submissions while suppressing cross-origin referrers. Null,
-missing, duplicate and foreign Origins remain rejected.
+302 redirect to this canonical URL. Discovery and network scans do not reserve
+configuration access. The first page shows saved and discovered networks, manual
+entry and a scan button. POST forms use `/` without a query; Host, Origin and
+cookies do not authorize or block them. Missing, null, duplicate and foreign
+Origins are accepted on the actual hotspot socket. The portal sets no cookies
+and has no browser session or Content-Security-Policy restrictions. Forwarded headers
+cannot replace the actual socket check.
 
 For offline captive discovery, configure NetworkManager's shared DNS to return
 the hotspot address for hostname queries. The Nix module's optional
@@ -37,8 +37,8 @@ portal does not intercept HTTPS or advertise CAPPORT through DHCP option 114.
 Automatic setup notifications depend on the phone; the direct HTTP URL remains
 available.
 
-Select **Configurer le Wi-Fi**, choose a network, and submit the form. If the
-network is missing from the list, use **Saisir un réseau Wi-Fi** to enter its
+Choose a network and select **Connecter l’appareil**. If the network is missing
+from the list, use **Saisir un réseau Wi-Fi** to enter its
 exact name, security (WPA/WPA2, WPA3 or open) and password. Manual entry also works
 when scan results are unavailable; network names must
 occupy 1–32 UTF-8 bytes. A single radio serving the recovery hotspot may not be
@@ -47,6 +47,31 @@ able to scan nearby networks at the same time.
 If the hotspot disappears while the device connects, the attempt can continue after
 the browser disconnects. If the device returns to the hotspot, reconnect to it
 and reopen the portal to check the outcome.
+
+## Controller authorization and retries
+
+The portal keeps a private controller reservation token under its request mutex;
+the token never reaches the browser. Each connection request reads `Status`,
+automatically acquires a token if needed and checks `Authorized` before calling
+`Connect`. If an existing token is no longer authorized, the portal reads
+`Status` again and releases that exact token only after confirming a settled
+hotspot. A confirmed `invalid-reservation` release means the old token is already
+gone. Other release errors preserve the token and stop that request. Connecting,
+unknown or unavailable states never trigger token cleanup. The controller's
+atomic authorization and active-attempt checks remain the final authority.
+
+`Connect` has a five-second timeout detached from browser cancellation, so losing
+the phone connection does not cancel dispatch. The portal retains the token after
+dispatch, including a lost reply, because a queued controller attempt may still
+need it. It never automatically retries `Connect`. A later manual click reads
+the current controller state again; a connecting attempt blocks another request,
+while a failed or cancelled attempt can be retried without waiting for a browser
+session. Concurrent submissions receive HTTP 409 while the portal mutex is held.
+Controller calls before dispatch share a separate five-second deadline.
+
+If the reply to `Reserve` is lost, the controller may hold an unknown reservation
+until its five-minute lease expires. The portal cannot release a token it never
+received; a later manual request may need to wait for that expiry.
 
 ## Appliance prerequisites
 
